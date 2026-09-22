@@ -440,6 +440,9 @@ async function collectInputs(
     const flagVal = flags[input.name];
     if (typeof flagVal === "string" && flagVal.trim().length > 0) {
       values[input.name] = flagVal.trim();
+    } else if (input.presetValue !== undefined) {
+      values[input.name] = input.presetValue;
+      presetsApplied.push(input);
     } else if (input.state === "required") {
       missing.push(input);
     } else if (input.state === "overridable") {
