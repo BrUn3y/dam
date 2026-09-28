@@ -1,9 +1,10 @@
-// TEST_OVERVIEW: a runtime migration moves an Agent's home from the volume its container mounted onto the disk of a machine on its owner's runner. What must hold at every phase is that nothing runs while the copy is taken, the copy reaches the machine before its first boot, and the old volume outlives the migration until the new guest has answered — so a failure anywhere leaves the agent's work where it was.
+// TEST_OVERVIEW: a runtime migration moves an Agent's home from the volume its container mounted onto the disk of a machine on its owner's runner. What must hold at every phase is that nothing runs while the copy is taken, the copy reaches the machine before its first boot, and the old volume outlives the migration until the new guest has answered and for a retention window after — so a failure anywhere, even one found after the move, leaves the agent's work where it was.
 package reconciler
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apiv1 "github.com/dam-agents/dam/packages/controller/api/v1"
+	"github.com/dam-agents/dam/packages/controller/pkg/config"
 	"github.com/dam-agents/dam/packages/controller/pkg/vmrunner"
 )
 
@@ -60,7 +62,7 @@ func completeJob(t *testing.T, r *AgentReconciler, condition batchv1.JobConditio
 	require.NoError(t, err)
 }
 
-// TEST_SCENARIO: a migration walks every phase: the old pod is waited out and its StatefulSet and headless Service removed, the machine is created and left stopped while a Job streams the home volume to the owner's runner, and only once that Job has finished is the machine allowed to boot. The old volume and the staged seed are both removed after the guest answers, and not a reconcile sooner.
+// TEST_SCENARIO: a migration walks every phase: the old pod is waited out and its StatefulSet and headless Service removed, the machine is created and left stopped while a Job streams the home volume to the owner's runner, and only once that Job has finished is the machine allowed to boot. The staged seed is removed after the guest answers, and not a reconcile sooner, and the old volume is then retained rather than deleted.
 func TestARuntimeMigrationCopiesTheHomeBeforeTheMachineFirstBoots(t *testing.T) {
 	ctx := context.Background()
 	agent := migratingAgentCR()
@@ -130,9 +132,119 @@ func TestARuntimeMigrationCopiesTheHomeBeforeTheMachineFirstBoots(t *testing.T) 
 	for _, key := range []string{annRuntimeMigration, annRuntimeMigrationSource, annRuntimeMigrationMessage} {
 		assert.NotContains(t, agent.Annotations, key)
 	}
-	_, err = r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "home-agent-my-agent-0", metav1.GetOptions{})
-	assert.True(t, k8serrors.IsNotFound(err), "the old volume goes once the guest is up")
-	assert.Equal(t, []string{"my-agent"}, node.seedGone, "and so does the staged seed")
+	assert.Equal(t, []string{"my-agent"}, node.seedGone, "the staged seed goes once the guest is up")
+	old, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "home-agent-my-agent-0", metav1.GetOptions{})
+	require.NoError(t, err, "the old volume is retained, not deleted")
+	assertRetained(t, old, "/home/agent", time.Now().Add(defaultMigrationRetention))
+}
+
+func assertRetained(t *testing.T, pvc *corev1.PersistentVolumeClaim, mount string, until time.Time) {
+	t.Helper()
+	assert.Equal(t, "my-agent", pvc.Labels[LabelRetainedFor])
+	for _, gone := range []string{LabelAgent, LabelMount, LabelPool, LabelPoolAvailable} {
+		assert.NotContains(t, pvc.Labels, gone, "a retained volume is invisible to everything that finds an agent's volumes by label")
+	}
+	assert.Equal(t, mount, pvc.Annotations[annRetainedMount])
+	kept, err := time.Parse(time.RFC3339, pvc.Annotations[annRetainedUntil])
+	require.NoError(t, err)
+	assert.WithinDuration(t, until, kept, time.Minute)
+	require.Len(t, pvc.OwnerReferences, 1, "the retained volume goes with the Agent")
+	assert.Equal(t, "my-agent", pvc.OwnerReferences[0].Name)
+}
+
+func retainedPVC(name, until string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "test-agents",
+		Labels:      map[string]string{LabelRetainedFor: "my-agent"},
+		Annotations: map[string]string{annRetainedUntil: until, annRetainedMount: "/home/agent"},
+	}}
+}
+
+// TEST_SCENARIO: the retention window is the install's to set, and a finish that is retried — its annotation patch failed after the volume was marked — keeps the window the first attempt gave rather than starting a new one.
+func TestTheRetentionWindowIsConfiguredAndNotExtendedByARetry(t *testing.T) {
+	ctx := context.Background()
+	agent := migratingAgentCR()
+	agent.Annotations[annRuntimeMigration] = runtimeMigrationBooting
+	agent.Annotations[annRuntimeMigrationSource] = "home-agent-my-agent-0"
+	r, node, _ := setupVMReconciler(t, agent)
+	r.config.VM.RuntimeMigration.Retention = config.Duration(48 * time.Hour)
+	pvc := homePVC("home-agent-my-agent-0")
+	pvc.Labels[LabelPool] = "10gi"
+	_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Create(ctx, pvc, metav1.CreateOptions{})
+	require.NoError(t, err)
+	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateRunning, Port: 31000, Ready: true})
+
+	require.NoError(t, r.finishRuntimeMigration(ctx, agent))
+	first, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "home-agent-my-agent-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	assertRetained(t, first, "/home/agent", time.Now().Add(48*time.Hour))
+
+	r.config.VM.RuntimeMigration.Retention = config.Duration(time.Hour)
+	require.NoError(t, r.finishRuntimeMigration(ctx, agent))
+	again, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "home-agent-my-agent-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, first.Annotations[annRetainedUntil], again.Annotations[annRetainedUntil])
+	assert.Len(t, again.OwnerReferences, 1)
+}
+
+// TEST_SCENARIO: the sweep ends retention. A volume past its window goes, and so does one whose Agent is gone; one inside its window stays, and so does one whose window an operator edited into something that is not a time, since deleting the only copy of an agent's old work on a typo cannot be undone.
+func TestTheSweepDeletesRetainedVolumesPastTheirWindowOrAgent(t *testing.T) {
+	ctx := context.Background()
+	agent := vmAgentCR()
+	r, _, _ := setupVMReconciler(t, agent)
+	past := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	future := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	orphan := retainedPVC("orphaned", future)
+	orphan.Labels[LabelRetainedFor] = "deleted-agent"
+	for _, p := range []*corev1.PersistentVolumeClaim{retainedPVC("expired", past), retainedPVC("kept", future), retainedPVC("typo", "next tuesday"), orphan} {
+		_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Create(ctx, p, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	r.ReconcileRetainedVolumes(ctx)
+
+	for name, kept := range map[string]bool{"expired": false, "orphaned": false, "kept": true, "typo": true} {
+		_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, name, metav1.GetOptions{})
+		if kept {
+			assert.NoError(t, err, name)
+		} else {
+			assert.True(t, k8serrors.IsNotFound(err), name)
+		}
+	}
+}
+
+// TEST_SCENARIO: deleting the Agent deletes what is retained for it along with its own volumes, and leaves another agent's retained volume alone.
+func TestDeletingTheAgentDeletesItsRetainedVolumes(t *testing.T) {
+	ctx := context.Background()
+	agent := vmAgentCR()
+	r, _, _ := setupVMReconciler(t, agent)
+	other := retainedPVC("other", time.Now().Add(time.Hour).UTC().Format(time.RFC3339))
+	other.Labels[LabelRetainedFor] = "other-agent"
+	for _, p := range []*corev1.PersistentVolumeClaim{retainedPVC("mine", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)), other} {
+		_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Create(ctx, p, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	r.deletePVCs(ctx, "my-agent")
+
+	_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "mine", metav1.GetOptions{})
+	assert.True(t, k8serrors.IsNotFound(err))
+	_, err = r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, "other", metav1.GetOptions{})
+	assert.NoError(t, err)
+}
+
+// TEST_SCENARIO: a StatefulSet claims volumes by name, so an Agent put back on the container backend by hand would mount the retained home of the same name and resume from before its move. Its StatefulSet is not created while anything is retained for it, and the error says what to do.
+func TestAContainerAgentIsNotStartedOverItsRetainedVolume(t *testing.T) {
+	ctx := context.Background()
+	agent := agentCR()
+	r, _ := setupReconciler(t, agent)
+	_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Create(ctx, retainedPVC("home-agent-my-agent-0", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = r.resolveWorkspaceClaims(ctx, agent, &agent.Spec)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "home-agent-my-agent-0")
+	assert.Contains(t, err.Error(), "recover or delete")
 }
 
 // TEST_SCENARIO: a copy that fails is reported and retried, and the machine is never booted from the image instead — that would seed a fresh home and the copy could never land.
@@ -251,4 +363,76 @@ func TestTheRunnerAdmitsItsOwnersMigrationJobToTheMachineAPIOnly(t *testing.T) {
 		}
 	}
 	assert.True(t, found)
+}
+
+func mountPVC(name, path string) *corev1.PersistentVolumeClaim {
+	return &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+		Name: name, Namespace: "test-agents",
+		Labels: map[string]string{LabelAgent: "my-agent", LabelMount: sanitizeMountName(path)},
+	}}
+}
+
+// TEST_SCENARIO: an Agent that persisted paths besides HOME on the container backend brings them along. The api-server rewrote its spec and said where each path went; the controller finds each path's volume while the pod is going, mounts it read-only beside the home in the copy Job and names where it goes below HOME, and after the guest has answered retains it with the home, each marked with the path it held. A path no volume was ever made for has nothing to carry, but it is still linked back at boot, since the agent's software still looks there.
+func TestAMigrationCarriesTheAgentsOtherPersistedVolumes(t *testing.T) {
+	ctx := context.Background()
+	agent := migratingAgentCR()
+	agent.Spec.Mounts = []apiv1.Mount{
+		{Path: "/home/agent", Persist: true},
+		{Path: "/home/agent/.persisted/data", Persist: true},
+		{Path: "/home/agent/cache", Persist: true},
+		{Path: "/home/agent/.persisted/never", Persist: true},
+	}
+	agent.Annotations[annRuntimeMigrationMounts] = `{"/data":"/home/agent/.persisted/data","/home/agent/cache":"/home/agent/cache","/never":"/home/agent/.persisted/never"}`
+	r, node, _ := setupVMReconciler(t, agent)
+	for _, p := range []*corev1.PersistentVolumeClaim{
+		homePVC("home-agent-my-agent-0"),
+		mountPVC("data-my-agent-0", "/data"),
+		mountPVC("home-agent-cache-my-agent-0", "/home/agent/cache"),
+	} {
+		_, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Create(ctx, p, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, r.Reconcile(ctx, agent))
+	agent = reloaded(t, r, agent)
+	require.Equal(t, runtimeMigrationCopying, agent.Annotations[annRuntimeMigration])
+	grafts, err := recordedGrafts(agent)
+	require.NoError(t, err)
+	assert.Equal(t, []runtimeMigrationGraft{
+		{From: "/data", At: ".persisted/data", PVC: "data-my-agent-0"},
+		{From: "/home/agent/cache", At: "cache", PVC: "home-agent-cache-my-agent-0"},
+	}, grafts)
+
+	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateStopped, Port: 31000})
+	require.NoError(t, r.Reconcile(ctx, agent))
+	job, err := r.client.BatchV1().Jobs("test-agents").Get(ctx, runtimeMigrationJobName("my-agent"), metav1.GetOptions{})
+	require.NoError(t, err)
+	pod := job.Spec.Template.Spec
+	command := pod.Containers[0].Command
+	assert.Contains(t, strings.Join(command, " "), "--graft .persisted/data=/mnt/extra/0 --graft cache=/mnt/extra/1")
+	assert.Contains(t, strings.Join(command, " "), `--links [{"path":"/data","at":".persisted/data"},{"path":"/never","at":".persisted/never"}]`,
+		"every path moved from outside HOME is linked back at boot, even one no volume was made for; one under HOME keeps its place and needs no link")
+	claims := map[string]string{}
+	for _, v := range pod.Volumes {
+		if v.PersistentVolumeClaim != nil {
+			assert.True(t, v.PersistentVolumeClaim.ReadOnly, "the copy never writes to a volume it copies")
+			claims[v.Name] = v.PersistentVolumeClaim.ClaimName
+		}
+	}
+	assert.Equal(t, map[string]string{"home": "home-agent-my-agent-0", "extra-0": "data-my-agent-0", "extra-1": "home-agent-cache-my-agent-0"}, claims)
+
+	completeJob(t, r, batchv1.JobComplete, time.Now())
+	require.NoError(t, r.Reconcile(ctx, agent))
+	agent = reloaded(t, r, agent)
+	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateRunning, Port: 31000, Ready: true})
+	require.NoError(t, r.Reconcile(ctx, agent))
+	agent = reloaded(t, r, agent)
+	for _, key := range []string{annRuntimeMigration, annRuntimeMigrationMounts, annRuntimeMigrationGrafts} {
+		assert.NotContains(t, agent.Annotations, key)
+	}
+	for name, mount := range map[string]string{"home-agent-my-agent-0": "/home/agent", "data-my-agent-0": "/data", "home-agent-cache-my-agent-0": "/home/agent/cache"} {
+		pvc, err := r.client.CoreV1().PersistentVolumeClaims("test-agents").Get(ctx, name, metav1.GetOptions{})
+		require.NoError(t, err, name)
+		assertRetained(t, pvc, mount, time.Now().Add(defaultMigrationRetention))
+	}
 }

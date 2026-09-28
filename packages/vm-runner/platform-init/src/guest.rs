@@ -1,4 +1,4 @@
-// UNIT_BOUNDARY_DESCRIPTION: the whole contract between the runner and the inside of its machines. The runner writes the share at these paths, and platform-init, which is the machine's entrypoint, reads it and lays out the disk by them. Both link this one file, so the contract exists once. Nothing here is configurable: nothing about a machine's storage varies per agent, so there is no plan to write and none to parse.
+// UNIT_BOUNDARY_DESCRIPTION: the whole contract between the runner and the inside of its machines. The runner writes the share at these paths, and platform-init, which is the machine's entrypoint, reads it and lays out the disk by them. Both link this one file, so the contract exists once. Nothing here is configurable: nothing about a machine's storage varies per agent, so there is no plan to write and none to parse. What a machine needs beyond that is made by the home's own boot hooks, which travel with the home rather than in the share.
 use std::path::{Path, PathBuf};
 
 pub const SHARE_PATH: &str = "/platform";
@@ -27,6 +27,10 @@ pub const SYSTEM_DIR: &str = "system";
 
 // UNIT_BOUNDARY_DESCRIPTION: the system store that holds the upper and work layers of the fresh root the image boots on. platform-init empties it on every boot, so nothing the image writes outside HOME outlives the boot that wrote it.
 pub const ROOTFS_DIR: &str = "rootfs";
+
+// UNIT_BOUNDARY_DESCRIPTION: the home's boot hooks, relative to the home: platform-init runs what is here on every boot, because the root is fresh each time and anything an agent needs outside its home must be made again. It is platform-init's corner of `.platform`, which is otherwise agent-runtime's state. A runtime migration puts PERSISTED_PATHS_HOOK here, the hook that links each persisted path it moved into the home back from its old place.
+pub const BOOT_HOOK_DIR: &str = ".platform/boot.d";
+pub const PERSISTED_PATHS_HOOK: &str = "10-persisted-paths.sh";
 
 pub fn agent_store(root: &Path) -> PathBuf {
     root.join(AGENT_DIR)
