@@ -2,6 +2,8 @@ package reconciler
 
 import (
 	"cmp"
+	"context"
+	stderrors "errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -46,6 +48,46 @@ const annRollRev = "agent-platform.ai/roll-rev"
 
 func sanitizeMountName(path string) string {
 	return strings.ReplaceAll(strings.TrimPrefix(path, "/"), "/", "-")
+}
+
+// UNIT_BOUNDARY_DESCRIPTION: an Agent's secretRef names a Secret by name alone, in the namespace that also holds every other owner's credentials, the runners' tokens and the gateways' keys, and every key of it lands in the agent's environment on both backends. So only a Secret carrying the Agent's own owner label is honoured, and never one the platform manages — the credentials a gateway injects and the pull Secrets the api-server writes carry the managed-by label, and a runner's token and certificate its component — because those are meant for everything except the agent. The refusal names the label to add rather than the Secret's contents, so an operator's Secret that predates the rule is one label away from working.
+func (r *AgentReconciler) ownedSecretRef(ctx context.Context, agent *apiv1.Agent) (*corev1.Secret, error) {
+	name := agent.Spec.SecretRef
+	if name == "" {
+		return nil, nil
+	}
+	sec, err := r.client.CoreV1().Secrets(r.config.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("reading secretRef %s: %w", name, err)
+	}
+	owner := agent.Labels[envoyOwnerLabel]
+	if owner == "" || sec.Labels[envoyOwnerLabel] != owner {
+		return nil, secretRefRefused(fmt.Sprintf("secretRef %s does not carry this agent's owner label (%s), so its keys are not given to the agent; label the Secret with its owner to use it", name, envoyOwnerLabel))
+	}
+	if sec.Labels[envoyManagedByLabel] != "" || sec.Labels["app.kubernetes.io/component"] == vmRunnerComponent {
+		return nil, secretRefRefused(fmt.Sprintf("secretRef %s is a Secret the platform manages, which is never given to an agent", name))
+	}
+	return sec, nil
+}
+
+// UNIT_BOUNDARY_DESCRIPTION: a secretRef the agent may not have, as against one that could not be read. A refusal is final for the Secret as it stands, so the agent is rendered without it — which also takes it off an agent that already had it — and the reconcile reports it; a read that failed is retried instead.
+type secretRefRefused string
+
+func (e secretRefRefused) Error() string { return string(e) }
+
+// UNIT_BOUNDARY_DESCRIPTION: the agent's spec as its workload is rendered: the stored spec, less a secretRef the check refused, and the refusal to report once the rest of the reconcile is done.
+func (r *AgentReconciler) renderedSpec(ctx context.Context, agent *apiv1.Agent) (*apiv1.AgentSpec, string, error) {
+	_, err := r.ownedSecretRef(ctx, agent)
+	var refused secretRefRefused
+	switch {
+	case stderrors.As(err, &refused):
+		spec := agent.Spec
+		spec.SecretRef = ""
+		return &spec, refused.Error(), nil
+	case err != nil:
+		return nil, "", err
+	}
+	return &agent.Spec, "", nil
 }
 
 func agentProxyAddr(cfg *config.Config, gatewayClusterIP string) string {
