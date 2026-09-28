@@ -700,6 +700,9 @@ jobs:
     # rule opens it to the runner's user, whom cluster:install probes it as.
     # On a PR that changes the vm-runner its release build shares this runner
     # with the other image builds, so this lane has the longer budget.
+    #
+    # The job summary carries the lane's per-phase timings (e2e:timings), from
+    # the marks E2E_TIMINGS collects and the Playwright JSON report.
     if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -709,7 +712,11 @@ jobs:
     env:
       IS_SANDBOX: "1"
       E2E_VIRTUALIZATION: "1"
+      E2E_TIMINGS: /tmp/e2e-timings
+      E2E_REPORT_JSON: /tmp/playwright-report.json
     steps:
+      - name: Record the job start
+        run: printf '%s\tjob started\n' "$(date +%s)" >> "$E2E_TIMINGS"
       - *e2e-checkout
       - name: Open /dev/kvm to the runner user
         run: |
@@ -762,6 +769,15 @@ jobs:
         env: *e2e-run-env
       - *e2e-image-log
       - *e2e-provision-log
+      # The background provision and image fetch each end by writing their
+      # status file, so its mtime is when they finished.
+      - name: Timing summary
+        if: ${{ !cancelled() }}
+        run: |
+          for mark in "k3s provisioned:/tmp/k3s-provision.status" "images ready:/tmp/ci-images.status"; do
+            [ ! -s "${mark#*:}" ] || printf '%s\t%s\n' "$(stat -c %Y "${mark#*:}")" "${mark%%:*}" >> "$E2E_TIMINGS"
+          done
+          .mise/tasks/e2e/timings | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

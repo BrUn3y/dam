@@ -185,7 +185,13 @@ export default defineConfig({
   fullyParallel: false,
   workers: 2,
   retries: 0,
-  reporter: [["list"], ["html", { open: "never" }]],
+  reporter: [
+    ["list"],
+    ["html", { open: "never" }],
+    ...(process.env.E2E_REPORT_JSON
+      ? [["json", { outputFile: process.env.E2E_REPORT_JSON }] as const]
+      : []),
+  ],
   expect: { timeout: 15_000 },
   use: {
     baseURL,
