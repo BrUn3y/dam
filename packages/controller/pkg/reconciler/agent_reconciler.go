@@ -36,30 +36,35 @@ type AgentReconciler struct {
 	dynamic dynamic.Interface
 	config  *config.Config
 
-	budgetMu       sync.Mutex
-	ownerLocks     map[string]*sync.Mutex
-	deniedWakes    map[string]string
-	parkedRetry    map[string]struct{}
-	busyProbe      func(ctx context.Context, agentName string) bool
-	runnerMu       sync.Mutex
-	runners        map[string]runnerConn
-	runnerEndpoint func(owner string) string
-	runnerRollMu   sync.Mutex
-	requeue        func(name string, after time.Duration)
-	lifetime       context.Context
-	podResize      atomic.Int32
-	agentCache     cache.GenericLister
-	vmRunning      sync.Map
-	resizeNotices  sync.Map
-	machineWatchMu sync.Mutex
-	machineWatches map[string]*machineWatch
-	preflightMu    sync.Mutex
-	preflight      vmPreflightResult
-	preflightDone  bool
+	budgetMu        sync.Mutex
+	ownerLocks      map[string]*sync.Mutex
+	deniedWakes     map[string]string
+	parkedRetry     map[string]struct{}
+	busyProbe       func(ctx context.Context, agentName string) bool
+	runnerMu        sync.Mutex
+	runners         map[string]runnerConn
+	runnerEndpoint  func(owner string) string
+	runnerRollMu    sync.Mutex
+	runnerRoll      runnerRollView
+	rollViewTTL     time.Duration
+	requeue         func(name string, after time.Duration)
+	lifetime        context.Context
+	podResize       atomic.Int32
+	agentCache      cache.GenericLister
+	vmRunning       sync.Map
+	resizeNotices   sync.Map
+	notReadyPolls   sync.Map
+	claimCapNotices sync.Map
+	ownerless       sync.Map
+	machineWatchMu  sync.Mutex
+	machineWatches  map[string]*machineWatch
+	preflightMu     sync.Mutex
+	preflight       vmPreflightResult
+	preflightDone   bool
 }
 
 func NewAgentReconciler(client kubernetes.Interface, dyn dynamic.Interface, cfg *config.Config) *AgentReconciler {
-	r := &AgentReconciler{client: client, dynamic: dyn, config: cfg}
+	r := &AgentReconciler{client: client, dynamic: dyn, config: cfg, rollViewTTL: runnerRollViewTTL}
 	r.busyProbe = func(ctx context.Context, name string) bool {
 		return agentPodIsBusy(ctx, r.config.Namespace, name)
 	}
@@ -246,10 +251,11 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, agent *apiv1.Agent) (er
 		}
 		machine, runnerReached, err = r.reconcileVMAgent(ctx, agent, ownerRef, gatewayIP, running)
 		if stderrors.Is(err, errLeafSecretPending) || stderrors.Is(err, errRunnerTLSPending) {
+			r.publishCertificateWait(ctx, agent, err)
 			return fmt.Errorf("agent %s: %w, requeuing", name, err)
 		}
 		if err != nil {
-			return r.setError(ctx, name, fmt.Sprintf("reconciling vm machine: %v", err))
+			return r.setMachineError(ctx, agent, err)
 		}
 		timer.mark("vmMachine")
 		if err := r.continueRuntimeMigration(ctx, agent, machine, runnerReached); err != nil {
@@ -452,16 +458,25 @@ func (r *AgentReconciler) ensureSecretOwnerReference(ctx context.Context, secret
 	})
 }
 
-func (r *AgentReconciler) Delete(ctx context.Context, name string, labels map[string]string) {
+// UNIT_BOUNDARY_DESCRIPTION: cleans up after a deleted Agent. It runs on the controller's delete queue rather than in the informer's handler, because removing a vm agent's machine is a call to its owner's runner that can take seconds or fail outright; an error asks the queue to try again later, and every step is safe to repeat.
+func (r *AgentReconciler) Delete(ctx context.Context, name, owner string) error {
 	r.deleteReleaseNsAgentResources(ctx, name)
 
 	r.deletePVCs(ctx, name)
-	r.deleteMachine(ctx, name, labels[envoyOwnerLabel])
+	if err := r.deleteMachine(ctx, name, owner); err != nil {
+		return err
+	}
 	r.vmRunning.Delete(name)
+	r.notReadyPolls.Delete(name)
 
 	r.clearDeniedWake(name)
 	r.clearParkedRetry(name)
 	unresolvedGrants.forget(name)
+	return nil
+}
+
+func AgentOwner(labels map[string]string) string {
+	return labels[envoyOwnerLabel]
 }
 
 func (r *AgentReconciler) deleteReleaseNsAgentResources(ctx context.Context, agentName string) {

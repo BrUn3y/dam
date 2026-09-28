@@ -232,12 +232,14 @@ func TestAnUnschedulableRunnerSaysWhyOnTheAgent(t *testing.T) {
 	u, err := r.dynamic.Resource(AgentsGVR).Namespace("test-agents").Get(context.Background(), "my-agent", metav1.GetOptions{})
 	require.NoError(t, err)
 	conds, _, _ := unstructured.NestedSlice(u.Object, "status", "conditions")
-	msg := ""
+	msg, reason := "", ""
 	for _, c := range conds {
 		if m, ok := c.(map[string]interface{}); ok && m["type"] == apiv1.ConditionAgentPodReady {
 			msg, _ = m["message"].(string)
+			reason, _ = m["reason"].(string)
 		}
 	}
+	assert.Equal(t, apiv1.ReasonMachineRunnerUnschedulable, reason, "a runner that cannot be placed is a failed start, not one still coming up")
 	assert.Contains(t, msg, "cannot be scheduled")
 	assert.Contains(t, msg, "Insufficient devices.kubevirt.io/kvm",
 		"the scheduler's own account reaches the agent, not just the generic starting message")
@@ -505,7 +507,7 @@ func TestVMBackendStopsTheMachineOnHardStop(t *testing.T) {
 func TestVMBackendDeleteRemovesTheMachine(t *testing.T) {
 	agent := vmAgentCR()
 	r, node, _ := setupVMReconciler(t, agent)
-	r.Delete(context.Background(), "my-agent", agent.Labels)
+	r.Delete(context.Background(), "my-agent", AgentOwner(agent.Labels))
 	assert.Equal(t, []string{"my-agent"}, node.deleted)
 }
 
@@ -551,11 +553,11 @@ func TestADeleteReachesOnlyTheOwnersRunner(t *testing.T) {
 	r, node, _ := setupVMReconciler(t, agent)
 	other := addRunner(t, r, "owner-b")
 
-	r.Delete(ctx, "my-agent", agent.Labels)
+	r.Delete(ctx, "my-agent", AgentOwner(agent.Labels))
 	assert.Equal(t, []string{"my-agent"}, node.deleted)
 	assert.Empty(t, other.deleted, "another owner's runner is not asked about this Agent's machine")
 
-	r.Delete(ctx, "no-runner-agent", map[string]string{envoyOwnerLabel: "owner-without-runner"})
+	r.Delete(ctx, "no-runner-agent", "owner-without-runner")
 	_, err := r.client.CoreV1().Secrets("test-agents").Get(ctx, r.runnerName("owner-without-runner"), metav1.GetOptions{})
 	assert.True(t, k8serrors.IsNotFound(err), "a delete does not mint credentials for a runner that does not exist")
 }
@@ -566,7 +568,7 @@ func TestADeleteWithNoOwnerReachesEveryRunner(t *testing.T) {
 	r, node, _ := setupVMReconciler(t, agent)
 	other := addRunner(t, r, "owner-b")
 
-	r.Delete(context.Background(), "my-agent", nil)
+	r.Delete(context.Background(), "my-agent", "")
 	assert.Equal(t, []string{"my-agent"}, node.deleted)
 	assert.Equal(t, []string{"my-agent"}, other.deleted)
 }
@@ -778,7 +780,7 @@ func TestRunnerMountsTheImageCacheAsItsOwnSource(t *testing.T) {
 	mounts := func(configure func(*config.VMRunnerSpec)) (map[string]corev1.VolumeMount, map[string]corev1.Volume) {
 		r, _, _ := setupVMReconciler(t, vmAgentCR())
 		configure(&r.config.VM.Runner)
-		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner))
+		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner, r.runnerOwnerRef(context.Background()), true))
 		dep, err := r.client.AppsV1().Deployments("test-agents").Get(
 			context.Background(), r.runnerName(testOwner), metav1.GetOptions{})
 		require.NoError(t, err)
@@ -817,7 +819,7 @@ func TestTheRunnerDialsTheSocketTheImageCacheServiceBinds(t *testing.T) {
 	args := func(configure func(*config.VMRunnerSpec)) []string {
 		r, _, _ := setupVMReconciler(t, vmAgentCR())
 		configure(&r.config.VM.Runner)
-		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner))
+		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner, r.runnerOwnerRef(context.Background()), true))
 		dep, err := r.client.AppsV1().Deployments("test-agents").Get(
 			context.Background(), r.runnerName(testOwner), metav1.GetOptions{})
 		require.NoError(t, err)
@@ -833,7 +835,7 @@ func TestEveryCacheIsBounded(t *testing.T) {
 	args := func(t *testing.T, configure func(*config.VMRunnerSpec)) (string, error) {
 		r, _, _ := setupVMReconciler(t, vmAgentCR())
 		configure(&r.config.VM.Runner)
-		if err := r.applyRunnerDeployment(context.Background(), testOwner); err != nil {
+		if err := r.applyRunnerDeployment(context.Background(), testOwner, r.runnerOwnerRef(context.Background()), true); err != nil {
 			return "", err
 		}
 		dep, err := r.client.AppsV1().Deployments("test-agents").Get(
@@ -1305,7 +1307,7 @@ func TestOnlyARunnerThatUnpacksImagesCanChownThem(t *testing.T) {
 	capsFor := func(configure func(*config.VMRunnerSpec)) []corev1.Capability {
 		r, _, _ := setupVMReconciler(t, vmAgentCR())
 		configure(&r.config.VM.Runner)
-		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner))
+		require.NoError(t, r.applyRunnerDeployment(context.Background(), testOwner, r.runnerOwnerRef(context.Background()), true))
 		dep, err := r.client.AppsV1().Deployments("test-agents").Get(
 			context.Background(), r.runnerName(testOwner), metav1.GetOptions{})
 		require.NoError(t, err)
