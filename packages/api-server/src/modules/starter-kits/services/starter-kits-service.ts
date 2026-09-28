@@ -14,6 +14,7 @@ import type {
   SkillsService,
   StarterKitApplyInput,
   StarterKitApplyResult,
+  StarterKitEgressRule,
   StarterKitResources,
   StarterKitScheduleOverride,
   StarterKitsService,
@@ -64,6 +65,13 @@ export interface StarterKitsServiceDeps {
   wakeAgent: (agentId: string) => Promise<void>;
   markAgentOnboarded: (agentId: string, at: string) => Promise<void>;
   runtimeMutator: Pick<RuntimeMutator, "bump" | "enqueueAfterCommit">;
+  egressRules: {
+    seed(
+      agentId: string,
+      rules: readonly StarterKitEgressRule[],
+      decidedBy: string,
+    ): Promise<void>;
+  };
   virtualizationEnabled?: boolean;
 }
 
@@ -309,6 +317,7 @@ export function createStarterKitsService(
           : {}),
         ...(kit.seed ? { gitRepo: seedGitRepo(kit.seed) } : {}),
         ...(kit.backend === "vm" ? { vm: true } : {}),
+        ...(kit.egressPreset ? { egressPreset: kit.egressPreset } : {}),
         ...agentShape(kit.resources),
         connectionIds: input.connectionIds,
         ...(kit.env.length > 0 ? { env: kit.env } : {}),
@@ -320,6 +329,7 @@ export function createStarterKitsService(
       const agent = await deps.agents.create(createInput);
 
       try {
+        await deps.egressRules.seed(agent.id, kit.egressRules, deps.owner);
         if (kit.install) {
           await deps.runtimeMutator.bump(agent.id, [
             workspaceCommandEvent(

@@ -1,5 +1,5 @@
 import { Close, Gift } from "@carbon/icons-react";
-import type { StarterKitView } from "api-server-api";
+import { formatEgressRuleInline, type StarterKitView } from "api-server-api";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
@@ -54,7 +54,12 @@ import { KitRepositoryCard } from "../../starter-kits/components/kit-repository-
 import { KitRequirementsCard } from "../../starter-kits/components/kit-requirements-card.js";
 import { KitScheduleCard } from "../../starter-kits/components/kit-schedule-card.js";
 import { KitSkillsSection } from "../../starter-kits/components/kit-skills-section.js";
-import { kitBadges } from "../../starter-kits/lib/catalog-cards.js";
+import {
+  EGRESS_PRESET_DETAIL,
+  EGRESS_PRESET_LABEL,
+  kitBadges,
+  kitEgressPreset,
+} from "../../starter-kits/lib/catalog-cards.js";
 import {
   allowedHarnesses,
   buildStarterKitApplyInput,
@@ -535,6 +540,41 @@ export function AgentCreateView({ kit }: { kit: StarterKitView | null }) {
               onToggleSkipped={() => update({ skipSeed: !form.skipSeed })}
             />
           </ul>
+        </section>
+      )}
+
+      {kit && (
+        <section className="mb-8">
+          <SectionLabel spaced>Network access</SectionLabel>
+          <Callout
+            tone={kitEgressPreset(kit) === "all" ? "warning" : "default"}
+            inset
+          >
+            <div>
+              {EGRESS_PRESET_LABEL[kitEgressPreset(kit)]}
+              {kit.egressPreset
+                ? ", set by the kit."
+                : ", the platform default."}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {EGRESS_PRESET_DETAIL[kitEgressPreset(kit)]} You can change it in
+              the agent&apos;s network settings once it is created.
+            </div>
+            {kit.egressRules.length > 0 && (
+              <div className="mt-2 text-xs">
+                <div className="text-muted-foreground">
+                  The kit also adds these rules:
+                </div>
+                <ul className="mt-1 flex flex-col gap-0.5 font-mono">
+                  {kit.egressRules.map((rule) => (
+                    <li key={formatEgressRuleInline(rule)}>
+                      {formatEgressRuleInline(rule)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </Callout>
         </section>
       )}
 
