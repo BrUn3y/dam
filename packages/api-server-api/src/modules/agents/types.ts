@@ -199,7 +199,8 @@ export type ConnectSlackError =
   | { type: "AgentNotFound" }
   | { type: "ChannelAlreadyBound" }
   | { type: "WorkspaceUnresolved" }
-  | { type: "WorkspaceUnreachable" };
+  | { type: "WorkspaceUnreachable" }
+  | { type: "NoSlackWorkspace" };
 
 export type ConnectSlackResult =
   { ok: true; value: Agent } | { ok: false; error: ConnectSlackError };
@@ -209,7 +210,8 @@ export type BindSlackChannelError =
   | { type: "AgentNotFound" }
   | { type: "ChannelAlreadyBound" }
   | { type: "WorkspaceUnresolved" }
-  | { type: "WorkspaceUnreachable" };
+  | { type: "WorkspaceUnreachable" }
+  | { type: "NoSlackWorkspace" };
 
 export type BindSlackChannelResult =
   | { ok: true; value: { slackChannelId: string; channelTitle: string | null } }
