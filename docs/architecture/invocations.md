@@ -1,6 +1,6 @@
 # Invocations
 
-Last verified: 2026-09-25
+Last verified: 2026-09-28
 
 ## Overview
 
@@ -48,6 +48,12 @@ sequenceDiagram
 - **Deadline.** The Driver sets a liveness deadline, clamped to about a minute up to six hours; past it the Invocation fails and the target is reaped mid-work.
 - **Restart.** A target pod that restarted cannot resume its one-shot turn, so the liveness sweep fails it at once from the restart count the controller publishes ([platform-topology](platform-topology.md)).
 - **Driver Cascade.** Deleting a Driver fails its running Invocations and reaps their targets, transitively for chains.
+
+## The Invocation Pin
+
+A Driver usually waits on its sub-agents from a script, and the signals that keep an Agent awake see sessions, connections and background work its harness reports — not a detached loop, and not a harness that reports nothing. Hibernating a waiting Driver kills the loop, and the results then have nobody to collect them. So while an Agent drives at least one running Invocation it carries a pin the controller's idle checker and early reclaim both honour ([agent-lifecycle](agent-lifecycle.md#hibernate)).
+
+**Only a spawn sets the pin**, as part of the spawn itself: a failed write fails the spawn and leaves no Invocation behind. **A periodic reconcile only releases it**, for each pinned Driver it finds with no running Invocation, reading that Driver first and only then checking its Invocations; the release is conditional on that read, so a spawn landing in between, which must change the Driver to pin it, fails the release and the next tick decides again. No terminal path has to remember to release it, whichever of them ended the last Invocation. **A hard stop or pause wins**: both clear the pin, and since the reconcile never sets one, a paused Driver stays down while its sub-agents finish; a spawn made while the stop still stands (inside a pause's settle window) leaves the Driver unpinned, and the spawn's write is conditional on the Driver being unchanged, so a pause landing mid-spawn fails it rather than being undone. It is pinned again only by a spawn after it is awake. A release bumps the Driver's activity, so its ordinary idle window starts from the last result and a chained spawn never finds it asleep; the bump and the cleared pin are one write under that same condition, so a pause that cleared the pin meanwhile keeps its stale clock. A Driver that crashed mid-fan-out stays up until its targets' deadlines end their Invocations.
 
 ## Driver SDK
 

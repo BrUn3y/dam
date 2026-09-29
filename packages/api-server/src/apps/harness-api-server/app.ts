@@ -157,6 +157,9 @@ export function startHarnessApiServerApp(deps: HarnessApiServerAppDeps) {
       owner,
       agents: agentsServiceFor(owner),
       skills: composeSkills(owner),
+      pinDriver: async (driverAgentId) => {
+        await agentsRepo.setInvocationPin(driverAgentId);
+      },
       runtimeMutator,
       wakeAgent,
       targetAdmission: createTargetAdmission({

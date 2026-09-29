@@ -15,6 +15,7 @@ import {
   AGENTS_PLURAL,
   ANN_STARTER_KIT_ONBOARDED,
   EXPERIMENT_ACTIVE_KEY,
+  INVOCATIONS_ACTIVE_KEY,
   LABEL_OWNER,
 } from "./modules/agents/infrastructure/labels.js";
 import {
@@ -201,6 +202,7 @@ import {
   createDriverResolutionAdapter,
   createInvocationsCleanupHook,
   createInvocationSetupFailure,
+  composeInvocationPinReconciler,
   listInvocationAgentIds,
 } from "./modules/invocations/index.js";
 import {
@@ -1367,6 +1369,18 @@ export async function bootstrap() {
     },
     batchSize: 200,
   });
+  const invocationPinReconciler = composeInvocationPinReconciler({
+    db,
+    listPinnedAgentIds: () =>
+      agentsRepo.listAgentIdsWithAnnotation(INVOCATIONS_ACTIVE_KEY, "true"),
+    readPin: (agentId) => agentsRepo.readInvocationPin(agentId),
+    release: (agentId, version) =>
+      agentsRepo.releaseInvocationPin(agentId, version),
+  });
+  await periodicJobs.register("invocation-pin-reconcile", 60_000, () =>
+    invocationPinReconciler.tick(),
+  );
+
   const invocationSetupFailure = createInvocationSetupFailure({
     db,
     agentsFor: harnessAgentsServiceFor,
