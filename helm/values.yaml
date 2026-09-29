@@ -356,8 +356,13 @@ virtualization:
   # the controller deletes it when the window passes or the agent is deleted.
   # The api-server reads the same value to name the window in the Migrate
   # dialog.
+  # `concurrency` caps the copy Jobs running at once in the install and
+  # `ownerConcurrency` those of one owner, whose copies all land on the same
+  # runner claim; a migration past either cap waits, and says so on the Agent.
   runtimeMigration:
     retention: 168h
+    concurrency: 10
+    ownerConcurrency: 1
   # The CA the controller trusts a runner's serving certificate by. It is the
   # runners' own and signs nothing else: the envoyMitm CA signs gateway leaves
   # for hostnames taken from users' credential hosts, so a leaf naming a
@@ -1729,7 +1734,19 @@ controller:
     # security objects:
     #   oc adm policy add-scc-to-user anyuid -z platform-migration -n <agents-ns>
     # Without it, the copy pod is rejected at admission, loudly, and the
-    # gated agent waits. The Job never mounts a token, joins no mesh, and
+    # gated agent waits.
+    #
+    # The runtime migration's copy Job (virtualization.runtimeMigration) runs
+    # under the same ServiceAccount. When any volume it copies is a block
+    # (ReadWriteOnce) volume it runs as root holding DAC_READ_SEARCH alone,
+    # which `anyuid` does not permit. With `openshift.scc.anyuidCapNet` on,
+    # the chart renders a migration-only SCC for it — uid 0, DAC_READ_SEARCH,
+    # drop ALL, no escalation, runtime/default seccomp — bound to the
+    # `platform-migration` ServiceAccount alone; otherwise grant an SCC of
+    # that shape to it. The storage Job keeps its `anyuid` grant. A refused
+    # copy pod is reported on the Agent with the Job's FailedCreate event.
+    #
+    # The storage Job never mounts a token, joins no mesh, and
     # deliberately does not inherit the agents' runtimeClassName (Kata
     # virtiofs refuses guest chown regardless of uid).
     jobImage: mirror.gcr.io/library/debian:stable-slim

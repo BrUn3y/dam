@@ -350,6 +350,7 @@ func TestAFailedHomeCopyIsReportedAndRetriedWithoutBooting(t *testing.T) {
 	agent := migratingAgentIn(apiv1.ReasonRuntimeMigrationCopying, time.Now())
 	agent.Annotations[annRuntimeMigrationSource] = "home-agent-my-agent-0"
 	r, node, _ := setupVMReconciler(t, agent)
+	createAll(t, r, homePVC("home-agent-my-agent-0"))
 	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateStopped, Port: 31000})
 	require.NoError(t, r.Reconcile(ctx, agent))
 	agent = reloaded(t, r, agent)
@@ -388,7 +389,8 @@ func TestACopyOutOfAttemptsFailsAndARetryStartsOver(t *testing.T) {
 	agent.Annotations[annRuntimeMigrationSource] = "home-agent-my-agent-0"
 	agent.Status.RuntimeMigrationAttempts = runtimeMigrationMaxAttempts
 	r, node, _ := setupVMReconciler(t, agent)
-	createAll(t, r, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: runtimeMigrationJobName("my-agent"), Namespace: "test-agents"}})
+	createAll(t, r, homePVC("home-agent-my-agent-0"))
+	createAll(t, r, &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: runtimeMigrationJobName("my-agent"), Namespace: "test-agents", OwnerReferences: []metav1.OwnerReference{agentOwnerRef(agent)}}})
 	completeJob(t, r, batchv1.JobFailed, time.Now().Add(-2*migrationJobRetryAfter))
 	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateStopped, Port: 31000})
 
@@ -555,6 +557,7 @@ func TestAFailedHomeCopySaysWhyItsLastAttemptFailed(t *testing.T) {
 	agent := migratingAgentIn(apiv1.ReasonRuntimeMigrationCopying, time.Now())
 	agent.Annotations[annRuntimeMigrationSource] = "home-agent-my-agent-0"
 	r, node, _ := setupVMReconciler(t, agent)
+	createAll(t, r, homePVC("home-agent-my-agent-0"))
 	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateStopped, Port: 31000})
 	require.NoError(t, r.Reconcile(ctx, agent))
 	agent = reloaded(t, r, agent)
@@ -592,11 +595,36 @@ func TestAFailedHomeCopySaysWhyItsLastAttemptFailed(t *testing.T) {
 		migrationCondition(reloaded(t, r, agent)).Message)
 }
 
-// TEST_SCENARIO: an agent with no volume at HOME has nothing to copy. The migration says so, in the phase that looks for the volume, rather than booting a machine that would silently start from the image.
-func TestAMigrationWithNoHomeVolumeSaysSo(t *testing.T) {
+// TEST_SCENARIO: an agent created and never woken has no volume at all, so once its StatefulSet is held at zero there is provably nothing to copy. The copy step ends at once: the migration goes straight to `Booting`, with a message that says so, and its machine is held to no seed and starts from the image. A guest that answers with the image's home is the verified boot, and the switch follows as for any migration.
+func TestAMigrationWithNothingToCopyBootsFromTheImage(t *testing.T) {
 	ctx := context.Background()
 	agent := migratingAgentIn(apiv1.ReasonRuntimeMigrationStopping, time.Now())
 	r, node, _ := setupVMReconciler(t, agent)
+	require.NoError(t, r.Reconcile(ctx, agent))
+	agent = reloaded(t, r, agent)
+	c := requirePhase(t, agent, apiv1.ReasonRuntimeMigrationBooting)
+	assert.Equal(t, runtimeMigrationNothingToCopy, c.Message)
+	assert.Equal(t, "true", agent.Annotations[annRuntimeMigrationEmpty])
+
+	require.NoError(t, r.Reconcile(ctx, agent))
+	agent = reloaded(t, r, agent)
+	assert.True(t, node.spec("my-agent").Running, "the machine boots without a seed")
+	assert.Nil(t, node.spec("my-agent").ExpectSeed, "and is held to none")
+	assert.Nil(t, node.spec("my-agent").Migration, "and can no longer be seeded")
+	_, err := r.client.BatchV1().Jobs("test-agents").Get(ctx, runtimeMigrationJobName("my-agent"), metav1.GetOptions{})
+	assert.True(t, k8serrors.IsNotFound(err), "there is nothing to copy, so no copy runs")
+
+	node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateRunning, Port: 31000, Ready: true})
+	require.NoError(t, r.Reconcile(ctx, agent))
+	requirePhase(t, reloaded(t, r, agent), apiv1.ReasonRuntimeMigrationVerified)
+}
+
+// TEST_SCENARIO: a volume without a home is not "nothing to copy": the migration waits in `Stopping` and says why, rather than boot a machine that silently starts from the image.
+func TestAMigrationWithAVolumeButNoHomeWaits(t *testing.T) {
+	ctx := context.Background()
+	agent := migratingAgentIn(apiv1.ReasonRuntimeMigrationStopping, time.Now())
+	r, node, _ := setupVMReconciler(t, agent)
+	createAll(t, r, mountPVC("data-my-agent-0", "/data"))
 	require.NoError(t, r.Reconcile(ctx, agent))
 	agent = reloaded(t, r, agent)
 	c := requirePhase(t, agent, apiv1.ReasonRuntimeMigrationStopping)
@@ -813,6 +841,7 @@ func TestACopyThatDoesNotSayWhichSeedItStoredIsMadeAgain(t *testing.T) {
 		agent := migratingAgentIn(apiv1.ReasonRuntimeMigrationCopying, time.Now())
 		agent.Annotations[annRuntimeMigrationSource] = "home-agent-my-agent-0"
 		r, node, _ := setupVMReconciler(t, agent)
+		createAll(t, r, homePVC("home-agent-my-agent-0"))
 		node.set("my-agent", vmrunner.MachineStatus{State: vmrunner.StateStopped, Port: 31000})
 		require.NoError(t, r.Reconcile(ctx, agent))
 		agent = reloaded(t, r, agent)
@@ -872,7 +901,7 @@ func TestTheCopyJobCarriesASeedCapabilityAndNeverTheRunnersToken(t *testing.T) {
 	r, _, _ := setupVMReconciler(t, agent)
 
 	require.NoError(t, r.applySeedCapability(ctx, agent, testOwner))
-	job, err := r.buildRuntimeMigrationJob(agent, testOwner, "home-agent-my-agent-0", nil)
+	job, err := r.buildRuntimeMigrationJob(agent, testOwner, "home-agent-my-agent-0", testRunnerPodIP, runtimeMigrationIdentity{uid: 65532, gid: 65532}, nil)
 	require.NoError(t, err)
 	pod := job.Spec.Template.Spec
 	var mounted []string
