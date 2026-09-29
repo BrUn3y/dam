@@ -11,6 +11,7 @@ export { templateSpecSchema } from "./modules/templates/schemas.js";
 export type {
   HarnessFamily,
   Template,
+  TemplateHarness,
   TemplateSpec,
   TemplatesService,
   Resources,
@@ -80,6 +81,11 @@ export {
   agentCreateInputSchema,
   agentKindSchema,
 } from "./modules/agents/schemas.js";
+export type {
+  AgentSetup,
+  AgentSetupResources,
+  AgentSetupSeed,
+} from "./modules/agents/setup.js";
 export { isProtectedAgentEnvName } from "./modules/agents/types.js";
 export {
   runtimeMigrationRefusalReasons,
