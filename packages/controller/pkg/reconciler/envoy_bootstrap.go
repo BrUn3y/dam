@@ -304,7 +304,12 @@ func buildTerminatingChain(p bootstrapParams, c envoyHostChain) ev {
 		"route_config": ev{
 			"name": "forward_" + c.ChainID,
 			"virtual_hosts": []any{
-				ev{"name": "default", "domains": []any{"*"}, "routes": buildChainForwardRoutes(c)},
+				ev{
+					"name":                      "default",
+					"domains":                   []any{"*"},
+					"routes":                    buildChainForwardRoutes(c),
+					"request_headers_to_remove": []any{connectionAddressHeader},
+				},
 			},
 		},
 	}
@@ -333,9 +338,14 @@ func buildTerminatingChain(p bootstrapParams, c envoyHostChain) ev {
 }
 
 func buildChainHTTPFilters(p bootstrapParams, c envoyHostChain) []any {
-	filters := []any{extAuthzHTTPFilter(p)}
+	var filters []any
+	if len(c.ConnectionIDs()) > 0 {
+		filters = append(filters, connectionAddressHTTPFilter(c))
+	}
+	filters = append(filters, extAuthzHTTPFilter(p))
 	for _, cred := range c.Credentials {
-		filters = append(filters, ev{
+		rivals := c.RivalsOf(cred)
+		filters = append(filters, skippedForRivals(ev{
 			"name": cred.FilterName(),
 			"typed_config": ev{
 				"@type":     "type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector",
@@ -357,15 +367,15 @@ func buildChainHTTPFilters(p bootstrapParams, c envoyHostChain) []any {
 					},
 				},
 			},
-		})
+		}, "envoy.filters.http.credential_injector", rivals))
 		if cred.QueryParamName != "" {
-			filters = append(filters, ev{
+			filters = append(filters, skippedForRivals(ev{
 				"name": cred.QueryParamFilterName(),
 				"typed_config": ev{
 					"@type":               "type.googleapis.com/envoy.extensions.filters.http.lua.v3.Lua",
 					"default_source_code": ev{"inline_string": luaQueryParamScript(cred.HeaderName, cred.QueryParamName)},
 				},
-			})
+			}, "envoy.filters.http.lua", rivals))
 		}
 	}
 	filters = append(filters, dynamicForwardProxyHTTPFilter(), routerHTTPFilter())
@@ -374,8 +384,12 @@ func buildChainHTTPFilters(p bootstrapParams, c envoyHostChain) []any {
 
 func buildChainForwardRoutes(c envoyHostChain) []any {
 	var routes []any
-	for _, connectionID := range c.ConnectionIDs() {
+	ids := c.ConnectionIDs()
+	for _, connectionID := range ids {
 		routes = append(routes, buildConnectionRoutes(c, connectionID)...)
+	}
+	for _, connectionID := range ids {
+		routes = append(routes, buildConnectionAddressRoutes(c, connectionID)...)
 	}
 	return append(routes, buildUnaddressedRoutes(c)...)
 }
@@ -467,7 +481,6 @@ func buildRefusedRoute(c envoyHostChain, scope string) ev {
 			"status": 403,
 			"body":   ev{"inline_string": refusedBody(c, scope)},
 		},
-		"typed_per_filter_config": extAuthzDisabledPerRoute(),
 	}
 }
 
@@ -483,8 +496,9 @@ func refusedBody(c envoyHostChain, scope string) string {
 	}
 	return fmt.Sprintf(
 		"More than one connection injects the same credential header on %s%s, so this request names no account. "+
-			"Prefix the request path with /%s/<connection-id>/ to choose one. Connections here: %s.\n",
-		c.Host, scope, connectionEgressPathSegment, strings.Join(ids, ", "))
+			"Prefix the request path with /%s/<connection-id>/, or send the connection's token placeholder %s<connection-id> where the credential goes, to choose one. "+
+			"Connections here: %s.\n",
+		c.Host, scope, connectionEgressPathSegment, connectionEgressPlaceholderPrefix, strings.Join(ids, ", "))
 }
 
 func buildChainRouteAction(c envoyHostChain) ev {
