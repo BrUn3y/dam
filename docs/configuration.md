@@ -15,6 +15,17 @@ The Envoy sidecar in each agent pod injects credentials on the wire — agents n
 
 Each agent's gateway verifies the upstream before it injects a credential. If something on the cluster's egress path intercepts TLS with its own CA (a corporate inspecting proxy, or the platform's own gateway when the platform runs inside one of its agents), every injected connection fails its handshake and the agent reports a 503. Name that CA with `controller.gatewayUpstreamExtraCAs`: `--set-file controller.gatewayUpstreamExtraCAs=proxy-ca.crt`. Gateways then trust it on top of the public roots. A connection that carries its upstream's own CA still validates against that CA alone. `mise run cluster:install` sets the value by itself when it runs inside one of the platform's vm agents.
 
+### Agents that inject only addressed requests (experimental)
+
+By default a gateway injects a Connection's credential into every request to its host, replacing whatever credential the request carries, unless two Connections compete for the same header. An agent created with **addressed injection** has a gateway that injects only when the request names the Connection: by its token placeholder or by its `/__platform_conn/<connection id>/` path prefix. Every other request keeps its own credential. Use it for an agent whose tools — Docker containers, nested agents — call the same services with their own credentials or none, so its gateway stops overwriting them.
+
+It is set per agent:
+
+- **Create page and agent settings:** turn on *Addressed credential injection* under Settings → Experimental features to see the switch. Settings show it without the flag on an agent that already has it, so it can be turned off. Changing it there restarts the agent's gateway.
+- **Starter kit:** `requireConnectionAddress: true` in `kit.yaml`. A kit sets it whether or not the creating user has the feature flag on.
+
+Values the platform hands an agent already carry an address. A Custom Header Connection that sets no environment variable must be reached through its path prefix on such an agent.
+
 ## Skills
 
 Three kinds of source show up in the Skills panel:

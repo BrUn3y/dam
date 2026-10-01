@@ -85,6 +85,7 @@ type envoyPathRewrite struct {
 }
 
 type envoyHostChain struct {
+	RequireAddress  bool
 	ChainID         string
 	Host            string
 	Credentials     []envoyCredential
@@ -675,8 +676,11 @@ func newEnvoyOTelView(instanceName string, cfg *config.Config) envoyOTelView {
 	return v
 }
 
-func BuildEnvoyBootstrapConfigMap(instanceName, attributionID string, vm bool, cfg *config.Config, ownerRef metav1.OwnerReference, secrets []corev1.Secret, l7Hosts []string) (*corev1.ConfigMap, error) {
+func BuildEnvoyBootstrapConfigMap(instanceName, attributionID string, vm bool, cfg *config.Config, ownerRef metav1.OwnerReference, secrets []corev1.Secret, l7Hosts []string, requireAddress bool) (*corev1.ConfigMap, error) {
 	chains := chainsFromSecrets(secrets, l7Hosts)
+	for i := range chains {
+		chains[i].RequireAddress = requireAddress
+	}
 	yaml, err := renderEnvoyBootstrap(instanceName, attributionID, cfg, chains, vm)
 	if err != nil {
 		return nil, err
@@ -733,7 +737,7 @@ func envoyVolumes(instanceName string, cfg *config.Config, secrets []corev1.Secr
 	return volumes
 }
 
-const envoyBootstrapTemplateRev = "v17-per-connection-routes"
+const envoyBootstrapTemplateRev = "v18-vendor-prefixed-addresses"
 
 func envoySecretsRev(secrets []corev1.Secret, l7Hosts []string) string {
 	parts := []string{"tmpl=" + envoyBootstrapTemplateRev}
@@ -757,12 +761,18 @@ func envoySecretsRev(secrets []corev1.Secret, l7Hosts []string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func envoyGatewayRev(cfg *config.Config, secrets []corev1.Secret, l7Hosts []string) string {
+func envoyGatewayRev(cfg *config.Config, secrets []corev1.Secret, l7Hosts []string, requireAddress bool) string {
 	rev := envoySecretsRev(secrets, l7Hosts)
-	if cfg.GatewayUpstreamTrustBundle == "" {
+	if cfg.GatewayUpstreamTrustBundle == "" && !requireAddress {
 		return rev
 	}
-	sum := sha256.Sum256([]byte(rev + "\ntrust=" + cfg.GatewayUpstreamTrustBundle))
+	if cfg.GatewayUpstreamTrustBundle != "" {
+		rev += "\ntrust=" + cfg.GatewayUpstreamTrustBundle
+	}
+	if requireAddress {
+		rev += "\nrequire-connection-address"
+	}
+	sum := sha256.Sum256([]byte(rev))
 	return hex.EncodeToString(sum[:8])
 }
 

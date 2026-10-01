@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 func connectionChain(host string, creds ...envoyCredential) envoyHostChain {
@@ -424,4 +426,122 @@ func TestLuaConnectionAddressScript_ListsEveryClaimedHeaderAndParam(t *testing.T
 		"a credential no connection owns has no address to read")
 	assert.Contains(t, script, "rh:clearRouteCache()")
 	assert.Contains(t, script, `string.lower(scheme) == "basic"`)
+}
+
+func requiringAddress(chains ...envoyHostChain) []envoyHostChain {
+	for i := range chains {
+		chains[i].RequireAddress = true
+	}
+	return chains
+}
+
+func assertInjectsOnlyWhenAddressed(t *testing.T, filter map[string]any, connectionID string) {
+	t.Helper()
+	cfg := filter["typed_config"].(map[string]any)
+	require.Equal(t, extensionWithMatcherType, cfg["@type"])
+	matchers := cfg["xds_matcher"].(map[string]any)["matcher_list"].(map[string]any)["matchers"].([]any)
+	require.Len(t, matchers, 1)
+	m := matchers[0].(map[string]any)
+	action := m["on_match"].(map[string]any)["action"].(map[string]any)["typed_config"].(map[string]any)
+	assert.Equal(t, skipFilterActionType, action["@type"])
+	single := m["predicate"].(map[string]any)["not_matcher"].(map[string]any)["single_predicate"].(map[string]any)
+	assert.Equal(t, connectionAddressHeader, single["input"].(map[string]any)["typed_config"].(map[string]any)["header_name"])
+	assert.Equal(t, map[string]any{"exact": connectionID}, single["value_match"],
+		"the injector skips every request that does not name this connection")
+}
+
+func TestRenderEnvoyBootstrap_RequireAddressGatesASingleConnection(t *testing.T) {
+	got, err := renderEnvoyBootstrap("inst-1", "", bootstrapTestCfg, requiringAddress(
+		connectionChain("api.anthropic.com",
+			connectionCredential("conn-one", "platform-conn-one", "Authorization", "api.anthropic.com"),
+		),
+	), false)
+	require.NoError(t, err)
+
+	injectors := injectorFilters(httpFiltersForHost(t, mustParseBootstrap(t, got), "api.anthropic.com"))
+	require.Len(t, injectors, 1)
+	assertInjectsOnlyWhenAddressed(t, injectors[0], "conn-one")
+	inner := injectors[0]["typed_config"].(map[string]any)["extension_config"].(map[string]any)
+	assert.Equal(t, "envoy.filters.http.credential_injector", inner["name"])
+	assert.Equal(t, true, inner["typed_config"].(map[string]any)["overwrite"])
+}
+
+func TestRenderEnvoyBootstrap_RequireAddressGatesRivalsByTheirOwnAddress(t *testing.T) {
+	got, err := renderEnvoyBootstrap("inst-1", "", bootstrapTestCfg, requiringAddress(
+		connectionChain("api.github.com",
+			connectionCredential("conn-aaa", "platform-conn-aaa", "Authorization", "api.github.com"),
+			connectionCredential("conn-bbb", "platform-conn-bbb", "Authorization", "api.github.com"),
+		),
+	), false)
+	require.NoError(t, err)
+	doc := mustParseBootstrap(t, got)
+
+	injectors := injectorFilters(httpFiltersForHost(t, doc, "api.github.com"))
+	require.Len(t, injectors, 2)
+	assertInjectsOnlyWhenAddressed(t, injectors[0], "conn-aaa")
+	assertInjectsOnlyWhenAddressed(t, injectors[1], "conn-bbb")
+	assert.Contains(t, got, "rh:respond", "a contested scope still refuses an unaddressed request")
+}
+
+func TestRenderEnvoyBootstrap_RequireAddressGatesTheQueryParamStep(t *testing.T) {
+	cred := connectionCredential("conn-q", "platform-conn-q", "X-Key", "api.example.com")
+	cred.QueryParamName = "key"
+	got, err := renderEnvoyBootstrap("inst-1", "", bootstrapTestCfg, requiringAddress(
+		connectionChain("api.example.com", cred),
+	), false)
+	require.NoError(t, err)
+
+	filters := httpFiltersForHost(t, mustParseBootstrap(t, got), "api.example.com")
+	var queryStep map[string]any
+	for _, f := range filters {
+		if f["name"] == cred.QueryParamFilterName() {
+			queryStep = f
+		}
+	}
+	require.NotNil(t, queryStep)
+	assertInjectsOnlyWhenAddressed(t, queryStep, "conn-q")
+}
+
+func TestRenderEnvoyBootstrap_RequireAddressLeavesCredentialsWithoutAConnectionPlain(t *testing.T) {
+	got, err := renderEnvoyBootstrap("inst-1", "", bootstrapTestCfg, requiringAddress(
+		credentialedChain("platform-conn-github", "api.github.com"),
+	), false)
+	require.NoError(t, err)
+
+	for _, f := range injectorFilters(httpFiltersForHost(t, mustParseBootstrap(t, got), "api.github.com")) {
+		assert.Equal(t,
+			"type.googleapis.com/envoy.extensions.filters.http.credential_injector.v3.CredentialInjector",
+			f["typed_config"].(map[string]any)["@type"],
+			"a credential with no connection has no address, so it injects as before")
+	}
+}
+
+func TestEnvoyGatewayRev_RollsTheGatewayWhenRequireAddressToggles(t *testing.T) {
+	assert.Equal(t, envoySecretsRev(nil, nil), envoyGatewayRev(bootstrapTestCfg, nil, nil, false),
+		"an agent that leaves the flag off keeps today's revision")
+	assert.NotEqual(t, envoyGatewayRev(bootstrapTestCfg, nil, nil, false), envoyGatewayRev(bootstrapTestCfg, nil, nil, true))
+}
+
+func TestBuildEnvoyBootstrapConfigMap_RequireAddressReachesEveryChain(t *testing.T) {
+	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "ConfigMap", Name: "owner", UID: "uid"}
+	secret := ownerSecret("platform-conn-anthropic", "connection", "conn-anthropic")
+	delete(secret.Annotations, envoyHostPatternAnn)
+	secret.Annotations[envoyInjectionHostsAnn] = `[{"host":"api.anthropic.com","headerName":"Authorization"}]`
+	secret = withHostSDS(secret, "api.anthropic.com")
+
+	off, err := BuildEnvoyBootstrapConfigMap("inst-1", "", false, bootstrapTestCfg, owner, []corev1.Secret{secret}, nil, false)
+	require.NoError(t, err)
+	on, err := BuildEnvoyBootstrapConfigMap("inst-1", "", false, bootstrapTestCfg, owner, []corev1.Secret{secret}, nil, true)
+	require.NoError(t, err)
+	assert.NotContains(t, off.Data["envoy.yaml"], "matcher_list")
+	assert.Contains(t, on.Data["envoy.yaml"], "matcher_list")
+}
+
+func TestLuaConnectionAddressScript_ReadsAnAddressBehindAVendorPrefix(t *testing.T) {
+	script := luaConnectionAddressScript(connectionChain("api.modal.com",
+		connectionCredential("conn-modal", "platform-conn-modal", "x-modal-token-secret", "api.modal.com"),
+	))
+	assert.Contains(t, script, `local vendor = string.match(value, "^(%l+%-)")`,
+		"a client that insists on a key prefix (as-, sk-) still names its connection: as-platform:conn:<id>")
+	assert.Contains(t, script, `#vendor <= 9`)
 }

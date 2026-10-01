@@ -207,6 +207,10 @@ local function address_in(value)
     end
     value = rest
   end
+  local vendor = string.match(value, "^(%l+%-)")
+  if vendor ~= nil and #vendor <= 9 and string.sub(value, #vendor + 1, #vendor + #PREFIX) == PREFIX then
+    value = string.sub(value, #vendor + 1)
+  end
   if string.sub(value, 1, #PREFIX) ~= PREFIX then return nil end
   local id = string.sub(value, #PREFIX + 1)
   if string.match(id, "^[%w%._~%-]+$") == nil then return nil end
@@ -272,3 +276,25 @@ function envoy_on_request(rh)
   end
 end
 `
+
+func skippedUnlessAddressed(filter ev, innerName, connectionID string) ev {
+	return ev{
+		"name": filter["name"],
+		"typed_config": ev{
+			"@type":            extensionWithMatcherType,
+			"extension_config": ev{"name": innerName, "typed_config": filter["typed_config"]},
+			"xds_matcher": ev{
+				"matcher_list": ev{"matchers": []any{ev{
+					"predicate": ev{"not_matcher": ev{"single_predicate": ev{
+						"input": ev{
+							"name":         "request-headers",
+							"typed_config": ev{"@type": requestHeaderInputType, "header_name": connectionAddressHeader},
+						},
+						"value_match": ev{"exact": connectionID},
+					}}},
+					"on_match": ev{"action": ev{"name": "skip", "typed_config": ev{"@type": skipFilterActionType}}},
+				}}},
+			},
+		},
+	}
+}

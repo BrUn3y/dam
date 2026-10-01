@@ -89,6 +89,7 @@ export const agentCreateInputSchema = z
       .optional(),
     egressPreset: egressPresetSchema.optional(),
     hibernationTimeoutMin: z.number().int().min(0).optional(),
+    requireConnectionAddress: z.boolean().optional(),
     gitRepo: z
       .object({
         url: z.url(),
@@ -118,6 +119,7 @@ export const agentUpdateInputSchema = z.object({
   secretRef: z.string().optional(),
   hibernationTimeoutMin: z.number().int().min(0).nullable().optional(),
   size: agentSizeSchema.optional(),
+  requireConnectionAddress: z.boolean().optional(),
 });
 
 export const agentConnectSlackInputSchema = z.object({
