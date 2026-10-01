@@ -4,6 +4,10 @@ import type {
   podSessionModeSchema,
   podSessionSchema,
   podSessionTypeSchema,
+  sessionHistoryInputSchema,
+  sessionHistorySchema,
+  storeDelegationFramesInputSchema,
+  delegationFramesSchema,
   sessionCategorySchema,
   sessionDirectoryEntrySchema,
   sessionListCursorSchema,
@@ -25,9 +29,21 @@ export interface SessionPage {
   nextCursor: SessionListCursor | null;
 }
 
+export type SessionHistoryInput = z.infer<typeof sessionHistoryInputSchema>;
+export type SessionHistory = z.infer<typeof sessionHistorySchema>;
+export type StoreDelegationFramesInput = z.infer<
+  typeof storeDelegationFramesInputSchema
+>;
+export type DelegationFrames = z.infer<typeof delegationFramesSchema>;
+
 export interface SessionsService {
   list(query?: SessionListQuery): Promise<SessionPage>;
   watch(signal?: AbortSignal): AsyncIterable<PodSessionNotice>;
+  history(sessionId: string): Promise<SessionHistory>;
+  storeDelegationFrames(
+    input: StoreDelegationFramesInput,
+  ): Promise<{ truncated: boolean }>;
+  delegationFrames(invocationId: string): Promise<DelegationFrames | null>;
 }
 
 export type SessionDirectoryEntry = z.infer<typeof sessionDirectoryEntrySchema>;

@@ -1,4 +1,5 @@
 import type {
+  SessionHistory,
   SessionListQuery,
   SessionPage,
   SessionsService,
@@ -10,9 +11,13 @@ import {
   pageSessions,
   type ListedHarnessSession,
 } from "../domain/session-list.js";
+import type { DelegationFramesStore } from "../infrastructure/delegation-frames-store.js";
+import type { HistoryProvider } from "../infrastructure/history-provider.js";
 import type { InProcessCaller } from "../infrastructure/in-process-request.js";
 import type { SessionMetadataStore } from "../infrastructure/session-metadata-store.js";
 import type { SessionChanges } from "./session-changes.js";
+
+const EMPTY_HISTORY: SessionHistory = { frames: [], truncated: false };
 
 const HARNESS_LISTING_TTL_MS = 30_000;
 const MAX_HARNESS_PAGES = 200;
@@ -63,6 +68,9 @@ export function createSessionsService(deps: {
   sessionMetadata: SessionMetadataStore;
   isRunning: (sessionId: string) => boolean;
   changes: SessionChanges;
+  sessionFrames: (sessionId: string) => SessionHistory;
+  delegations: DelegationFramesStore;
+  historyProvider?: HistoryProvider;
   log: (msg: string) => void;
   now?: () => number;
 }): SessionsService {
@@ -102,6 +110,30 @@ export function createSessionsService(deps: {
         },
       );
       return pageSessions(composed, query);
+    },
+
+    /**
+     * UNIT_BOUNDARY_DESCRIPTION: a session's replay read as data rather than
+     * over the chat protocol, for a caller that wants to keep the conversation
+     * rather than show it. The live transcript answers while the session is
+     * loaded; otherwise the harness image's own history provider does, which is
+     * the same source a cold re-attach replays from. Neither having anything is
+     * an empty answer, not a failure: a harness that declares no provider, or a
+     * session that produced nothing, has nothing to keep.
+     */
+    async history(sessionId): Promise<SessionHistory> {
+      const live = deps.sessionFrames(sessionId);
+      if (live.frames.length > 0) return live;
+      const stored = await deps.historyProvider?.fetch(sessionId);
+      return stored ? { frames: stored, truncated: false } : EMPTY_HISTORY;
+    },
+
+    async storeDelegationFrames(input) {
+      return deps.delegations.store(input);
+    },
+
+    async delegationFrames(invocationId) {
+      return deps.delegations.read(invocationId);
     },
 
     watch: (signal) =>

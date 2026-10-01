@@ -28,10 +28,16 @@ function makeService(opts: {
     listRunningByDriver: async () => [],
     listRunningAgentIds: async () => [],
     listTargetsByOwner: async () => [],
-    listAgedTerminal: async () => [],
+    listRootDriverIds: async () => [],
+    listTerminalUnreaped: async () => [],
+    markReaped: async () => {},
+    listByRoot: async () => [],
+    listUnreapedByRoot: async () => [],
     delete: async (id) => {
       rec.deleted.push(id);
     },
+    markTranscriptCaptured: async () => {},
+    deleteReapedByRoot: async () => 0,
   };
   const service = createInvocationsService({
     owner: "owner-1",
@@ -44,6 +50,7 @@ function makeService(opts: {
       delete: async () => {},
     } as never,
     driverResolution: { resolveRoot: opts.resolveRoot },
+    reaper: { reap: async () => {} },
     runtimeMutator: {
       bump: async () => 0,
       enqueueAfterCommit: async () => {},

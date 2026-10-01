@@ -23,10 +23,14 @@ import {
   inheritProvider,
 } from "../domain/provider-inheritance.js";
 import { buildInvocationPrompt } from "../domain/invocation-prompt.js";
-import { invocationTargetName } from "../domain/target-name.js";
+import {
+  invocationScheduleId,
+  invocationTargetName,
+} from "../domain/target-name.js";
 import { createSetupFailure } from "./setup-failure.js";
 import type { DriverResolution } from "./driver-resolution.js";
 import type { TargetAdmission } from "./target-admission.js";
+import { REPORT_GRACE_MS, type TargetReaper } from "./target-reaper.js";
 import type {
   InvocationsRepository,
   InvocationStatus,
@@ -112,15 +116,18 @@ export function createInvocationsService(deps: {
   runtimeMutator: RuntimeMutator;
   wakeAgent: (agentId: string) => Promise<void>;
   targetAdmission?: TargetAdmission;
+  reaper: TargetReaper;
+  reportGraceMs?: number;
   skills?: Pick<SkillsService, "applyEntries">;
   pinDriver?: (driverAgentId: string) => Promise<void>;
   now?: () => Date;
 }): InvocationsService {
   const now = deps.now ?? (() => new Date());
+  const reportGraceMs = deps.reportGraceMs ?? REPORT_GRACE_MS;
   const ajv = new Ajv({ allErrors: true, strict: false });
   const failSetup = createSetupFailure({
     repo: deps.repo,
-    agentsFor: () => deps.agents,
+    reaper: deps.reaper,
   });
 
   function compileSchema(schema: unknown): ValidateFunction {
@@ -178,19 +185,27 @@ export function createInvocationsService(deps: {
       }
 
       const targetId = generateK8sName("agent");
-      const expiresAt = new Date(
-        now().getTime() +
-          (input.ttlMs === undefined
-            ? DEFAULT_INVOCATION_TTL_MS
-            : Math.min(
-                MAX_INVOCATION_TTL_MS,
-                Math.max(MIN_INVOCATION_TTL_MS, input.ttlMs),
-              )),
-      );
+      const ttlMs =
+        input.ttlMs === undefined
+          ? DEFAULT_INVOCATION_TTL_MS
+          : Math.min(
+              MAX_INVOCATION_TTL_MS,
+              Math.max(MIN_INVOCATION_TTL_MS, input.ttlMs),
+            );
+      const expiresAt = new Date(now().getTime() + ttlMs);
       await deps.repo.insert({
         id: targetId,
         driverAgentId: input.driverAgentId,
+        rootDriverId: rootId,
         owner: deps.owner,
+        label: input.label ?? null,
+        prompt: input.prompt,
+        templateId: input.target.templateId ?? null,
+        image: input.target.image ?? null,
+        connections: input.connections,
+        cpu: created.size?.cpu ?? null,
+        memory: created.size?.memory ?? null,
+        ttlMs,
         resultSchema: input.schema,
         expiresAt,
       });
@@ -246,10 +261,10 @@ export function createInvocationsService(deps: {
             ]
           : []),
         {
-          id: `invocation:${agent.id}:${at.getTime()}`,
+          id: `${invocationScheduleId(agent.id)}:${at.getTime()}`,
           kind: "trigger",
           payload: {
-            scheduleId: `invocation:${agent.id}`,
+            scheduleId: invocationScheduleId(agent.id),
             task,
             sessionMode: "fresh",
           },
@@ -309,9 +324,11 @@ export function createInvocationsService(deps: {
       if (!stored) {
         return { ok: false, errors: "invocation is no longer running" };
       }
-      try {
-        await deps.agents.delete(invocationId);
-      } catch {}
+      const timer = setTimeout(
+        () => void deps.reaper.reap({ id: row.id, owner: row.owner }),
+        reportGraceMs,
+      );
+      timer.unref();
       return { ok: true };
     },
   };

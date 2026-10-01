@@ -63,6 +63,8 @@ describe("createSessionsService", () => {
       sessionMetadata: fakeStore(),
       isRunning: () => false,
       changes,
+      sessionFrames: () => ({ frames: [], truncated: false }),
+      delegations: { store: () => ({ truncated: false }), read: () => null },
       log: () => {},
     });
 

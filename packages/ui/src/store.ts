@@ -11,6 +11,10 @@ import {
 } from "./modules/features/store.js";
 import { createFilesSlice, type FilesSlice } from "./modules/files/store.js";
 import {
+  createInvocationsSlice,
+  type InvocationsSlice,
+} from "./modules/invocations/store.js";
+import {
   createDialogSlice,
   type DialogSlice,
 } from "./modules/platform/store/dialog.js";
@@ -49,6 +53,7 @@ export type PlatformStore = DialogSlice &
   SessionsSlice &
   FilesSlice &
   ArtifactsSlice &
+  InvocationsSlice &
   FeaturesSlice &
   PermissionsSlice;
 
@@ -61,6 +66,7 @@ export const useStore = create<PlatformStore>()((...a) => ({
   ...createSessionsSlice(...a),
   ...createFilesSlice(...a),
   ...createArtifactsSlice(...a),
+  ...createInvocationsSlice(...a),
   ...createFeaturesSlice(...a),
   ...createPermissionsSlice(...a),
 }));

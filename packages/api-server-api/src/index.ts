@@ -30,7 +30,10 @@ export type {
   SpawnInvocationRequest,
   SpawnInvocationResponse,
   InvocationView,
+  InvocationStatus,
+  InvocationsControlService,
   InvocationsQueryService,
+  DelegationNode,
 } from "./modules/invocations/types.js";
 
 export type {
@@ -577,6 +580,7 @@ export type {
   TelemetryService,
   TelemetryTurnsQuery,
   TelemetryTurnQuery,
+  TelemetryInvocationTurnsQuery,
   TelemetryLogsQuery,
   TelemetryExportSignal,
   TurnSummary,
@@ -587,6 +591,7 @@ export type {
   LogAttachment,
   TelemetryTurnsResult,
   TelemetryTurnResult,
+  TelemetryInvocationTurnsResult,
   TelemetryLogsResult,
 } from "./modules/telemetry/types.js";
 

@@ -81,6 +81,12 @@ import { DockedFilePanel } from "../../files/components/docked-file-panel.js";
 import { FilesPanel } from "../../files/components/files-panel.js";
 import { ImportInProgressBadge } from "../../files/components/import-in-progress-badge.js";
 import { useFileTree } from "../../files/hooks/use-file-tree.js";
+import {
+  DelegationOwnersProvider,
+  useDelegationOwners,
+} from "../../invocations/components/delegation-owners.js";
+import { DockedDelegationPanel } from "../../invocations/components/docked-delegation-panel.js";
+import { LiveDelegationBlock } from "../../invocations/components/live-delegation-block.js";
 import { OnboardingBar } from "../../starter-kits/components/onboarding-bar.js";
 import { useTurns } from "../../telemetry/api/queries.js";
 import { TurnTelemetry } from "../../telemetry/components/turn-telemetry.js";
@@ -185,6 +191,11 @@ export function ChatView() {
   const deleteSession = useStore((s) => s.deleteSession);
   const openFilePath = useStore((s) => s.openFilePath);
   const openArtifactId = useStore((s) => s.openArtifactId);
+  const openDelegation = useStore((s) =>
+    s.openDelegation?.driverAgentId === s.selectedAgent
+      ? s.openDelegation
+      : null,
+  );
   const artifactsSectionOpen = useStore((s) => s.artifactsSectionOpen);
   const setArtifactsSectionOpen = useStore((s) => s.setArtifactsSectionOpen);
   const goBack = useStore((s) => s.goBack);
@@ -249,6 +260,7 @@ export function ChatView() {
   const stickRef = useRef(true);
   const [showJump, setShowJump] = useState(false);
   const telemetryEnabled = useFeatures().data?.["agent-telemetry"] ?? false;
+  const delegationOwners = useDelegationOwners(messages);
   const avatarsEnabled = useAgentAvatars();
   const telemetryLive = useMemo(() => {
     if (messages.some((m) => m.role === "assistant" && m.streaming))
@@ -737,47 +749,56 @@ export function ChatView() {
                           )}
                         </div>
                       )}
-                    {items.map((item) => {
-                      if (item.kind === "divider") {
+                    <DelegationOwnersProvider value={delegationOwners}>
+                      {items.map((item) => {
+                        if (item.kind === "divider") {
+                          return (
+                            <div
+                              key={item.key}
+                              className="flex items-center gap-3 py-2"
+                            >
+                              <span className="h-px flex-1 bg-border/60" />
+                              <span className="text-[11px] text-muted-foreground">
+                                {dividerLabel(item, now)}
+                              </span>
+                              <span className="h-px flex-1 bg-border/60" />
+                            </div>
+                          );
+                        }
+                        const turn = turnForMessage.get(item.message.id);
                         return (
-                          <div
-                            key={item.key}
-                            className="flex items-center gap-3 py-2"
-                          >
-                            <span className="h-px flex-1 bg-border/60" />
-                            <span className="text-[11px] text-muted-foreground">
-                              {dividerLabel(item, now)}
-                            </span>
-                            <span className="h-px flex-1 bg-border/60" />
-                          </div>
-                        );
-                      }
-                      const turn = turnForMessage.get(item.message.id);
-                      return (
-                        <Fragment key={item.message.id}>
-                          <ChatMessage
-                            message={item.message}
-                            avatarAgentName={
-                              avatarsEnabled ? agentView?.name : undefined
-                            }
-                            isLast={item.index === messages.length - 1}
-                            {...timeProps(item.message.at, now)}
-                            hasPendingPermission={hasPendingPermission}
-                            onRetry={sendPrompt}
-                            onFileClick={openFileHandler}
-                            onDelete={deleteMessage}
-                            onLoadOlder={loadOlderKeepingScroll}
-                          />
-                          {selectedAgent && sessionId && turn && (
-                            <TurnTelemetry
-                              agentId={selectedAgent}
-                              sessionId={sessionId}
-                              turn={turn}
+                          <Fragment key={item.message.id}>
+                            <ChatMessage
+                              message={item.message}
+                              avatarAgentName={
+                                avatarsEnabled ? agentView?.name : undefined
+                              }
+                              isLast={item.index === messages.length - 1}
+                              {...timeProps(item.message.at, now)}
+                              hasPendingPermission={hasPendingPermission}
+                              onRetry={sendPrompt}
+                              onFileClick={openFileHandler}
+                              onDelete={deleteMessage}
+                              onLoadOlder={loadOlderKeepingScroll}
                             />
-                          )}
-                        </Fragment>
-                      );
-                    })}
+                            {selectedAgent && sessionId && turn && (
+                              <TurnTelemetry
+                                agentId={selectedAgent}
+                                sessionId={sessionId}
+                                turn={turn}
+                              />
+                            )}
+                          </Fragment>
+                        );
+                      })}
+                    </DelegationOwnersProvider>
+                    {selectedAgent && (
+                      <LiveDelegationBlock
+                        driverAgentId={selectedAgent}
+                        busy={busy}
+                        claimed={delegationOwners}
+                      />
+                    )}
                     {telemetryEnabled && sessionTurns.isError && (
                       <p className="py-1 text-[11px] text-muted-foreground/70">
                         Telemetry for this session could not be read.
@@ -845,7 +866,7 @@ export function ChatView() {
         </div>
 
         {}
-        {(openFilePath || openArtifactId) && (
+        {(openDelegation || openFilePath || openArtifactId) && (
           <>
             <div className="hidden md:flex">
               <ResizeHandle
@@ -876,7 +897,13 @@ export function ChatView() {
                 "md:border-l md:border-border",
               )}
             >
-              {openFilePath ? (
+              {openDelegation ? (
+                <DockedDelegationPanel
+                  key={openDelegation.id}
+                  driverAgentId={openDelegation.driverAgentId}
+                  id={openDelegation.id}
+                />
+              ) : openFilePath ? (
                 <DockedFilePanel onOpenFile={openFileHandler} />
               ) : openArtifactId ? (
                 <DockedArtifactPanel

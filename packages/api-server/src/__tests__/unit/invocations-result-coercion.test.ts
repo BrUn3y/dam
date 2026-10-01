@@ -24,8 +24,14 @@ function makeService(row: InvocationRow) {
     listRunningByDriver: async () => [],
     listRunningAgentIds: async () => [],
     listTargetsByOwner: async () => [],
-    listAgedTerminal: async () => [],
+    listRootDriverIds: async () => [],
+    listTerminalUnreaped: async () => [],
+    markReaped: async () => {},
+    listByRoot: async () => [],
+    listUnreapedByRoot: async () => [],
     delete: async () => {},
+    markTranscriptCaptured: async () => {},
+    deleteReapedByRoot: async () => 0,
   };
   const service = createInvocationsService({
     owner: "owner-1",
@@ -34,6 +40,7 @@ function makeService(row: InvocationRow) {
       delete: async () => {},
     } as never,
     driverResolution: { resolveRoot: async (id: string) => id },
+    reaper: { reap: async () => {} },
     runtimeMutator: {} as never,
     wakeAgent: async () => {},
   });
@@ -44,6 +51,16 @@ function runningRow(resultSchema: unknown): InvocationRow {
   return {
     id: "agent-1",
     driverAgentId: "driver-1",
+    rootDriverId: "driver-1",
+    label: null,
+    prompt: "",
+    templateId: null,
+    image: null,
+    connections: [],
+    cpu: null,
+    memory: null,
+    ttlMs: null,
+    createdAt: new Date(),
     owner: "owner-1",
     resultSchema,
     result: null,
@@ -51,6 +68,9 @@ function runningRow(resultSchema: unknown): InvocationRow {
     errorReason: null,
     expiresAt: new Date(Date.now() + 60_000),
     completedAt: null,
+    reapedAt: null,
+    transcriptCaptured: false,
+    transcriptTruncated: false,
   };
 }
 

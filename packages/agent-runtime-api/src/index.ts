@@ -11,10 +11,13 @@ export type {
   PodSessionType,
   SessionCategory,
   SessionDirectoryEntry,
+  SessionHistory,
   SessionListCursor,
   SessionListQuery,
   SessionPage,
   SessionsService,
+  StoreDelegationFramesInput,
+  DelegationFrames,
 } from "./modules/sessions/types.js";
 export {
   podSessionModeSchema,
@@ -23,6 +26,8 @@ export {
   SESSION_CATEGORIES,
   SESSION_LIST_MAX_LIMIT,
   sessionDirectoryReportSchema,
+  sessionHistorySchema,
+  delegationFramesSchema,
 } from "./modules/sessions/schemas.js";
 export {
   sessionCategoryOf,

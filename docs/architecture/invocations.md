@@ -1,10 +1,10 @@
 # Invocations
 
-Last verified: 2026-09-28
+Last verified: 2026-10-01
 
 ## Overview
 
-An **Invocation** is a run-once request from one Agent to another: a **Driver** asks a **target** to do one piece of work and return one result that matches a JSON Schema the Driver supplied. The common case pairs it with a freshly spawned, Sweepable target — a *temporary agent* in the interface — that exists for that one task and is deleted as soon as the Invocation goes terminal.
+An **Invocation** is a run-once request from one Agent to another: a **Driver** asks a **target** to do one piece of work and return one result that matches a JSON Schema the Driver supplied. The common case pairs it with a freshly spawned, Sweepable target — a *temporary agent* in the interface — that exists for that one task and is reaped as soon as the Invocation goes terminal.
 
 The Driver is almost always a script: a loop an agent wrote that fans work out and gathers the results. It speaks to the platform over the per-agent HTTP surface on the harness port, where the caller is the waypoint-authenticated agent in the path; no request body ever names the Driver.
 
@@ -18,7 +18,7 @@ sequenceDiagram
   API->>T: create Agent, queue seed → install → task
   T->>T: seed, install, open one fresh session
   T->>API: report_result
-  API->>API: validate against the schema, delete the target
+  API->>API: validate against the schema, reap the target
   D->>API: poll until done or failed
 ```
 
@@ -40,14 +40,25 @@ sequenceDiagram
 
 ## Outcomes
 
-**One result, validated structurally.** The target calls the `report_result` platform tool; the api-server validates the value against the stored schema — shape only, never truth — flips the Invocation to done and deletes the target. The schema lives on the Invocation record and never on a Kubernetes resource.
+**One result, validated structurally.** The target calls the `report_result` platform tool; the api-server validates the value against the stored schema — shape only, never truth — flips the Invocation to done and reaps the target a few seconds later, so the last telemetry the target exported lands before its pod goes. The schema lives on the Invocation record and never on a Kubernetes resource.
 
 **Failure says why.** A failed Invocation carries the platform's reason, because the target is gone by the time the Driver sees it. The reasons:
 
-- **Setup failed.** A setup step that does not land fails the Invocation the first time, naming the step and the tail of its error, and deletes the target. That covers a seed or install the target's runtime reports as failed, and a declared skill the apply could neither install nor account for: a turn that runs without a skill the Driver asked for would otherwise return a result the Driver cannot read as incomplete. There is no retry: the Driver is waiting and can spawn again, while a long-lived agent retries within its attempt budget because a user comes back to it.
+- **Setup failed.** A setup step that does not land fails the Invocation the first time, naming the step and the tail of its error, and reaps the target. That covers a seed or install the target's runtime reports as failed, and a declared skill the apply could neither install nor account for: a turn that runs without a skill the Driver asked for would otherwise return a result the Driver cannot read as incomplete. There is no retry: the Driver is waiting and can spawn again, while a long-lived agent retries within its attempt budget because a user comes back to it.
 - **Deadline.** The Driver sets a liveness deadline, clamped to about a minute up to six hours; past it the Invocation fails and the target is reaped mid-work.
 - **Restart.** A target pod that restarted cannot resume its one-shot turn, so the liveness sweep fails it at once from the restart count the controller publishes ([platform-topology](platform-topology.md)).
 - **Driver Cascade.** Deleting a Driver fails its running Invocations and reaps their targets, transitively for chains.
+- **Stopped.** The owner stops a running target from the Driver's chat; the Invocation fails with that reason and the target is reaped like any other.
+
+**One reap path.** Every way a target goes — reported, failed, deadline, restart, cascade, stopped — goes through one reap, which the liveness sweep backstops: a reap that did not land, or one an api-server restart forgot, is finished by the next tick. A deleted root drops only the records whose reap landed; the sweep drops the rest once it finishes their reap and finds the root gone.
+
+## The delegation record
+
+**The Invocation outlives its target.** The record keeps what the target was given — prompt, label, harness or image, connections, size — and what it returned, for as long as its **root Driver** exists: the first non-target Agent up the chain, since a grandchild's immediate Driver is itself a throwaway. It goes with the root Driver's other agent-scoped rows ([persistence](persistence.md#lifetime)). No age limit and no knob. Spend is not on the record; it stays in telemetry, keyed by the invocation id the target's gateway stamps ([observability](observability.md)).
+
+**The target's conversation is kept on the root Driver's volume.** Before a reap, the platform reads the target's one session out of its pod and hands the frames to the root Driver's runtime, which keeps them with the root's own sessions, one file per target, and the record notes that it was captured. Copies are byte-capped per target, keeping the newest frames, and in total per root, evicting the oldest. Capture is best effort and bounded: it never blocks a report, never fails a reap, and **never wakes the root** — a root that is not up (stopped, paused, crashed, or whose script did not await its spawn) keeps no copy. A cascade that deletes the root itself skips capture, since the root's volume goes too. The copy is read-only history, opened beside the Driver's chat and never loaded back as a live session.
+
+**The Driver's chat is the anchor.** The progress lines both SDKs print to stderr, naming each spawned target, are what the chat recognises in the Driver's tool output to draw the delegation in place, so their shape is a contract the SDKs and the chat share. While children run and no line names them yet, the chat shows the Driver's running Invocations from the record.
 
 ## The Invocation Pin
 

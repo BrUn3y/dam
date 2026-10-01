@@ -28,8 +28,14 @@ function repoStub(overrides: Partial<InvocationsRepository> = {}) {
     listRunningByDriver: async () => [],
     listRunningAgentIds: async () => [],
     listTargetsByOwner: async () => [],
-    listAgedTerminal: async () => [],
+    listRootDriverIds: async () => [],
+    listTerminalUnreaped: async () => [],
+    markReaped: async () => {},
+    markTranscriptCaptured: async () => {},
+    listByRoot: async () => [],
+    listUnreapedByRoot: async () => [],
     delete: async () => {},
+    deleteReapedByRoot: async () => 0,
     ...overrides,
   };
   return { repo, failed };
@@ -65,6 +71,7 @@ function makeService(opts: { failPin?: boolean } = {}) {
       enqueueAfterCommit: async () => {},
     } as never,
     wakeAgent: async () => {},
+    reaper: { reap: async () => {} },
     skills: {
       applyEntries: async (input) => {
         skillsApplied.push(input);
@@ -183,8 +190,7 @@ function makeFailingSkillsService(
   }) => Promise<unknown>,
 ) {
   const { repo, failed } = repoStub({
-    get: async () =>
-      ({ id: "agent-1", owner: "owner-1", status: "running" }) as never,
+    get: async (id) => ({ id, owner: "owner-1", status: "running" }) as never,
   });
   const deleted: string[] = [];
   const service = createInvocationsService({
@@ -204,6 +210,11 @@ function makeFailingSkillsService(
       enqueueAfterCommit: async () => {},
     } as never,
     wakeAgent: async () => {},
+    reaper: {
+      reap: async (row) => {
+        deleted.push(row.id);
+      },
+    },
     skills: { applyEntries } as never,
   });
   return { service, failed, deleted };
@@ -348,7 +359,7 @@ describe("spawn inherits the driver's provider", () => {
 });
 
 describe("a failed seed or install fails the Invocation", () => {
-  // TEST_SCENARIO: the driver is polling and the target will never start, so the Invocation fails at once with the step and its reason, and the target is deleted.
+  // TEST_SCENARIO: the driver is polling and the target will never start, so the Invocation fails at once with the step and its reason, and the target goes through the reap path.
   test("a running target fails with the step's reason and is deleted", async () => {
     const { repo, failed } = repoStub({
       get: async () =>
@@ -357,11 +368,11 @@ describe("a failed seed or install fails the Invocation", () => {
     const deleted: string[] = [];
     const fail = createSetupFailure({
       repo,
-      agentsFor: () => ({
-        delete: async (id: string) => {
-          deleted.push(id);
+      reaper: {
+        reap: async (row) => {
+          deleted.push(row.id);
         },
-      }),
+      },
     });
 
     await fail("agent-1", "install", "exit 1: no matching distribution");
@@ -377,11 +388,11 @@ describe("a failed seed or install fails the Invocation", () => {
     const deleted: string[] = [];
     const fail = createSetupFailure({
       repo,
-      agentsFor: () => ({
-        delete: async (id: string) => {
-          deleted.push(id);
+      reaper: {
+        reap: async (row) => {
+          deleted.push(row.id);
         },
-      }),
+      },
     });
 
     await fail(

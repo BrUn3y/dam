@@ -201,6 +201,7 @@ import {
   composeInvocationLivenessSweep,
   createDriverResolutionAdapter,
   createInvocationsCleanupHook,
+  createPodSessionClient,
   createInvocationSetupFailure,
   composeInvocationPinReconciler,
   listInvocationAgentIds,
@@ -335,6 +336,10 @@ export async function bootstrap() {
     log: (m) => getLogger().warn(`[agents] ${m}`),
   });
   const agentsRepo = createAgentsRepository(k8sClient, agentStateCache);
+  const delegationFrames = createPodSessionClient({
+    namespace: config.namespace,
+    isReady: (agentId) => agentsRepo.isReady(agentId),
+  });
   const liveAgentsRepo = createAgentsRepository(
     k8sClient,
     createLiveAgentStateCache(k8sClient),
@@ -1173,6 +1178,7 @@ export async function bootstrap() {
       cleanup: createInvocationsCleanupHook({
         db,
         agentsFor: (owner) => harnessAgentsServiceFor(owner),
+        frames: delegationFrames,
       }),
     },
     {
@@ -1314,7 +1320,9 @@ export async function bootstrap() {
           }
         : null;
     },
+    hasAgent: async (agentId) => (await agentsRepo.get(agentId)) !== null,
     batchSize: 200,
+    frames: delegationFrames,
   });
   const invocationPinReconciler = composeInvocationPinReconciler({
     db,
@@ -1331,6 +1339,7 @@ export async function bootstrap() {
   const invocationSetupFailure = createInvocationSetupFailure({
     db,
     agentsFor: harnessAgentsServiceFor,
+    frames: delegationFrames,
   });
   for (const kind of workspaceMutationEventKinds)
     runtimeDelivery.registerEventOutcomeHandler(kind, async (event, input) => {
@@ -1428,6 +1437,7 @@ export async function bootstrap() {
     isTermsAccepted,
     e2e: e2eService,
     artifacts,
+    delegationFrames,
     liveEvents: liveEventsModule.liveEvents,
     k8sClient,
     agentsRepo,
@@ -1468,6 +1478,7 @@ export async function bootstrap() {
     runtimeMutator: runtimeDelivery.runtimeMutator,
     runtimeProgress: contributionsProgressPort,
     artifacts,
+    delegationFrames,
     k8sClient,
     agentsRepo,
     templatesRepo,

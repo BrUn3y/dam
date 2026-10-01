@@ -1,11 +1,9 @@
-import type { AgentsService } from "api-server-api";
 import type { InvocationsRepository } from "../infrastructure/invocations-repository.js";
+import { REPORT_GRACE_MS, type TargetReaper } from "./target-reaper.js";
 
 export interface InvocationLivenessSweep {
   tick(): Promise<void>;
 }
-
-const RESULT_RETENTION_MS = 10 * 60 * 1000;
 
 export interface TargetRestartState {
   podRestarts: number;
@@ -14,8 +12,9 @@ export interface TargetRestartState {
 
 export interface CreateInvocationLivenessSweepDeps {
   repo: InvocationsRepository;
-  agentsFor: (owner: string) => AgentsService;
+  reaper: TargetReaper;
   readTargetRestart: (agentId: string) => Promise<TargetRestartState | null>;
+  hasAgent: (agentId: string) => Promise<boolean>;
   batchSize: number;
   now?: () => Date;
 }
@@ -31,13 +30,7 @@ export function createInvocationLivenessSweep(
     reason: string,
   ): Promise<void> {
     await deps.repo.fail(row.id, reason);
-    try {
-      await deps.agentsFor(row.owner).delete(row.id);
-    } catch (err) {
-      process.stderr.write(
-        `[invocation-liveness] reap ${row.id} failed: ${err instanceof Error ? err.message : err}\n`,
-      );
-    }
+    await deps.reaper.reap(row);
   }
 
   async function tick(): Promise<void> {
@@ -72,17 +65,20 @@ export function createInvocationLivenessSweep(
         }
       }
 
-      const rowDeadline = new Date(now().getTime() - RESULT_RETENTION_MS);
-      const aged = await deps.repo.listAgedTerminal(
-        rowDeadline,
+      const graceEnd = new Date(now().getTime() - REPORT_GRACE_MS);
+      const unreaped = await deps.repo.listTerminalUnreaped(
+        graceEnd,
         deps.batchSize,
       );
-      for (const row of aged) {
+      for (const row of unreaped) {
+        await deps.reaper.reap(row);
         try {
-          await deps.repo.delete(row.id);
+          if (!(await deps.hasAgent(row.rootDriverId))) {
+            await deps.repo.deleteReapedByRoot(row.rootDriverId);
+          }
         } catch (err) {
           process.stderr.write(
-            `[invocation-liveness] drop ${row.id} failed: ${err instanceof Error ? err.message : err}\n`,
+            `[invocation-liveness] orphan-check ${row.id} failed: ${err instanceof Error ? err.message : err}\n`,
           );
         }
       }

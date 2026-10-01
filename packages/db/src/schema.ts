@@ -773,7 +773,16 @@ export const invocations = pgTable(
   {
     id: text("id").primaryKey(),
     driverAgentId: text("driver_agent_id").notNull(),
+    rootDriverId: text("root_driver_id").notNull(),
     owner: text("owner").notNull(),
+    label: text("label"),
+    prompt: text("prompt").notNull().default(""),
+    templateId: text("template_id"),
+    image: text("image"),
+    connections: jsonb("connections").$type<string[]>().notNull().default([]),
+    cpu: text("cpu"),
+    memory: text("memory"),
+    ttlMs: integer("ttl_ms"),
     resultSchema: jsonb("result_schema").notNull(),
     result: jsonb("result"),
     status: text("status").notNull().default("running"),
@@ -782,10 +791,19 @@ export const invocations = pgTable(
       .defaultNow()
       .notNull(),
     completedAt: timestamp("completed_at", { withTimezone: true }),
+    reapedAt: timestamp("reaped_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    transcriptCaptured: boolean("transcript_captured").notNull().default(false),
+    transcriptTruncated: boolean("transcript_truncated")
+      .notNull()
+      .default(false),
   },
   (table) => [
     index("invocations_driver_idx").on(table.driverAgentId),
+    index("invocations_root_driver_idx").on(table.rootDriverId),
+    index("invocations_unreaped_idx")
+      .on(table.completedAt)
+      .where(sql`${table.reapedAt} IS NULL`),
     index("invocations_status_expiry_idx")
       .on(table.expiresAt)
       .where(sql`${table.status} = 'running'`),

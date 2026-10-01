@@ -41,10 +41,12 @@ import {
 } from "./services/session-changes.js";
 import { createInProcessCaller } from "./infrastructure/in-process-request.js";
 import { createSessionsService } from "./services/sessions-service.js";
+import { createDelegationFramesStore } from "./infrastructure/delegation-frames-store.js";
 
 export interface ComposeAcpOptions {
   command: string[];
   workingDir: string;
+  agentHome: string;
   stateBackend: DocumentStoreBackend;
   envReader: RuntimeEnvReader;
   sessionHistory?: {
@@ -104,6 +106,7 @@ export function composeAcp(opts: ComposeAcpOptions): {
     () => new Date().toISOString(),
   );
   const activeTurns = createActiveTurnStore(opts.stateBackend);
+  const historyProvider = historyProviderOf(opts);
   const runtime = createAcpRuntime({
     undeliveredPrompts,
     activeTurns,
@@ -119,7 +122,7 @@ export function composeAcp(opts: ComposeAcpOptions): {
     sessionMetadata,
     isTerminalSessionActive: opts.isTerminalSessionActive,
     onArtifactTouch: opts.onArtifactTouch,
-    historyProvider: historyProviderOf(opts),
+    ...(historyProvider ? { historyProvider } : {}),
     log: opts.log,
     envReadyAtBoot: opts.envReader.ready(),
     beforeFirstSpawn: opts.beforeFirstSpawn,
@@ -137,6 +140,9 @@ export function composeAcp(opts: ComposeAcpOptions): {
     sessionMetadata,
     isRunning: (sessionId) => runtime.isSessionRunning(sessionId),
     changes: sessionChanges,
+    sessionFrames: (sessionId) => runtime.sessionFrames(sessionId),
+    delegations: createDelegationFramesStore(opts.agentHome),
+    ...(historyProvider ? { historyProvider } : {}),
     log: opts.log,
   });
 
