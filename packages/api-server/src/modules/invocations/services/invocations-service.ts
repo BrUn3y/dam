@@ -5,6 +5,7 @@ import {
   type AgentSetup,
   type AgentsService,
   DEFAULT_INVOCATION_TTL_MS,
+  type InvocationHarnessConfig,
   MIN_INVOCATION_TTL_MS,
   MAX_INVOCATION_TTL_MS,
   type ProviderPresetType,
@@ -15,6 +16,7 @@ import {
   type RuntimeMutator,
   workspaceCommandEvent,
 } from "../../runtime-delivery/index.js";
+import { harnessConfigEvent } from "../../harness-config/index.js";
 import { generateK8sName } from "../../agents/infrastructure/configmap-mappers.js";
 import { createInputFromSetup } from "../../agents/index.js";
 import { getLogger } from "../../../core/logger.js";
@@ -28,6 +30,11 @@ import {
   invocationTargetName,
 } from "../domain/target-name.js";
 import { createSetupFailure } from "./setup-failure.js";
+import {
+  HARNESS_CONFIG_STEP,
+  type ReadHarnessConfigSupport,
+} from "../domain/harness-config-refusal.js";
+import { harnessConfigRefusalFor } from "./harness-config-check.js";
 import type { DriverResolution } from "./driver-resolution.js";
 import type { TargetAdmission } from "./target-admission.js";
 import { REPORT_GRACE_MS, type TargetReaper } from "./target-reaper.js";
@@ -85,6 +92,7 @@ export interface SpawnInput {
   schema: unknown;
   label?: string;
   ttlMs?: number;
+  harnessConfig?: InvocationHarnessConfig;
 }
 
 export interface RecordResult {
@@ -115,6 +123,7 @@ export function createInvocationsService(deps: {
   driverResolution: DriverResolution;
   runtimeMutator: RuntimeMutator;
   wakeAgent: (agentId: string) => Promise<void>;
+  readHarnessConfigSupport: ReadHarnessConfigSupport;
   targetAdmission?: TargetAdmission;
   reaper: TargetReaper;
   reportGraceMs?: number;
@@ -208,6 +217,7 @@ export function createInvocationsService(deps: {
         ttlMs,
         resultSchema: input.schema,
         expiresAt,
+        harnessConfig: input.harnessConfig ?? null,
       });
       let agent;
       try {
@@ -249,28 +259,44 @@ export function createInvocationsService(deps: {
         resultSchema: input.schema,
       });
       const at = now();
-      await deps.runtimeMutator.bump(agent.id, [
-        ...(input.setup.install
-          ? [
-              workspaceCommandEvent(
-                "invocation-install",
-                agent.id,
-                input.setup.install.command,
-                at,
-              ),
-            ]
-          : []),
-        {
-          id: `${invocationScheduleId(agent.id)}:${at.getTime()}`,
-          kind: "trigger",
-          payload: {
-            scheduleId: invocationScheduleId(agent.id),
-            task,
-            sessionMode: "fresh",
+      try {
+        if (input.harnessConfig) {
+          await deps.runtimeMutator.bump(agent.id, [
+            harnessConfigEvent(
+              agent.id,
+              input.harnessConfig,
+              at.getTime(),
+              expiresAt,
+            ),
+          ]);
+        }
+        await deps.runtimeMutator.bump(agent.id, [
+          ...(input.setup.install
+            ? [
+                workspaceCommandEvent(
+                  "invocation-install",
+                  agent.id,
+                  input.setup.install.command,
+                  at,
+                ),
+              ]
+            : []),
+          {
+            id: `${invocationScheduleId(agent.id)}:${at.getTime()}`,
+            kind: "trigger",
+            payload: {
+              scheduleId: invocationScheduleId(agent.id),
+              task,
+              sessionMode: "fresh",
+            },
+            expiresAt,
           },
-          expiresAt,
-        },
-      ]);
+        ]);
+      } catch (err) {
+        await deps.agents.delete(agent.id).catch(() => {});
+        await deps.repo.delete(targetId).catch(() => {});
+        throw err;
+      }
       await deps.runtimeMutator.enqueueAfterCommit(agent.id);
       await deps.wakeAgent(agent.id);
 
@@ -314,6 +340,16 @@ export function createInvocationsService(deps: {
       }
       if (row.status !== "running") {
         return { ok: false, errors: `invocation already ${row.status}` };
+      }
+      const refusal = await harnessConfigRefusalFor(
+        row,
+        deps.readHarnessConfigSupport,
+      );
+      if (refusal) {
+        return {
+          ok: false,
+          errors: await failSetup(invocationId, HARNESS_CONFIG_STEP, refusal),
+        };
       }
       const validate = compileSchema(row.resultSchema);
       const value = coerceResult(result, validate);
