@@ -465,6 +465,7 @@ export {
 export {
   platformTurnEndedParamsSchema,
   buildPlatformTurnEndedNotification,
+  jsonRpcErrorDetails,
   platformPromptAcceptedParamsSchema,
   buildPlatformPromptAcceptedNotification,
   platformPromptStartedParamsSchema,
