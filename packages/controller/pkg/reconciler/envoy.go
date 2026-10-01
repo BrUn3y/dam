@@ -41,6 +41,8 @@ const (
 	envoyLeafTLSVolume          = "envoy-tls"
 	envoyLeafTLSMount           = "/etc/envoy/tls"
 	connectionEgressPathSegment = "__platform_conn"
+	envoyImageCABundle          = "/etc/ssl/certs/ca-certificates.crt"
+	envoyUpstreamCAKey          = "upstream-ca.pem"
 )
 
 const (
@@ -50,6 +52,13 @@ const (
 
 func EnvoyBootstrapName(instanceName string) string {
 	return instanceName + "-envoy-bootstrap"
+}
+
+func gatewayUpstreamTrustedCA(cfg *config.Config) string {
+	if cfg.GatewayUpstreamTrustBundle == "" {
+		return envoyImageCABundle
+	}
+	return envoyBootstrapMount + "/" + envoyUpstreamCAKey
 }
 
 type envoyCredential struct {
@@ -673,6 +682,9 @@ func BuildEnvoyBootstrapConfigMap(instanceName, attributionID string, vm bool, c
 		return nil, err
 	}
 	data := map[string]string{"envoy.yaml": yaml}
+	if cfg.GatewayUpstreamTrustBundle != "" {
+		data[envoyUpstreamCAKey] = cfg.GatewayUpstreamTrustBundle
+	}
 	if vm {
 		data[machineDNSCorefileKey] = machineDNSCorefile
 	}
@@ -742,6 +754,15 @@ func envoySecretsRev(secrets []corev1.Secret, l7Hosts []string) string {
 	}
 	sort.Strings(parts[1:])
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:8])
+}
+
+func envoyGatewayRev(cfg *config.Config, secrets []corev1.Secret, l7Hosts []string) string {
+	rev := envoySecretsRev(secrets, l7Hosts)
+	if cfg.GatewayUpstreamTrustBundle == "" {
+		return rev
+	}
+	sum := sha256.Sum256([]byte(rev + "\ntrust=" + cfg.GatewayUpstreamTrustBundle))
 	return hex.EncodeToString(sum[:8])
 }
 
